@@ -1838,6 +1838,10 @@ tbody tr:hover {
     height: 36px;
   }
 
+  .mobile-logout-button {
+    margin-left: auto;
+  }
+
   .main-content {
     min-height: calc(100dvh - 64px);
     margin-left: 0;

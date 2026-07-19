@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // 将时区数据库嵌入程序，确保独立运行时也能使用默认中国时区。
 )
 
 // Config 汇总进程启动后不会变化的运行参数。

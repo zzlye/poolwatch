@@ -22,6 +22,7 @@ test('390×844：手机页面无横向滚动、底部导航不遮挡设置页内
   await page.goto('/')
 
   await expect(page.getByRole('navigation', { name: '手机主导航' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
   await expectNoHorizontalScroll(page)
 
   await page.getByRole('link', { name: '设置' }).last().focus()

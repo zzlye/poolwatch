@@ -7,6 +7,7 @@ import AuthPage from '../pages/AuthPage'
 import SettingsPage from '../pages/SettingsPage'
 import TargetWizardPage, { targetToDraft } from '../pages/TargetWizardPage'
 import TargetDetailPage from '../pages/TargetDetailPage'
+import { AppShell } from '../components/AppShell'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
 import { ThemeProvider, useTheme } from '../hooks/useTheme'
@@ -29,6 +30,21 @@ describe('首次设置', () => {
     renderWithClient(<AuthPage initialized={false} productName="号池监控" onAuthenticated={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: '完成设置' }))
     expect(screen.getByRole('alert')).toHaveTextContent('请填写管理员账号和密码')
+  })
+})
+
+describe('跨端导航', () => {
+  it('桌面侧栏和手机顶栏都提供退出登录入口', () => {
+    const logout = vi.fn()
+    render(
+      <MemoryRouter>
+        <AppShell bootstrap={{ initialized: true, authenticated: true, productName: '号池监控', totpEnabled: false }} onLogout={logout} />
+      </MemoryRouter>
+    )
+    const buttons = screen.getAllByRole('button', { name: '退出登录' })
+    expect(buttons).toHaveLength(2)
+    fireEvent.click(buttons[1])
+    expect(logout).toHaveBeenCalledOnce()
   })
 })
 

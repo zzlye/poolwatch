@@ -33,6 +33,9 @@ export function AppShell({ bootstrap, onLogout }: { bootstrap: BootstrapState; o
       <div className="mobile-topbar">
         <span className="brand-mark"><ShieldCheck aria-hidden="true" /></span>
         <strong>{bootstrap.productName}</strong>
+        <button className="icon-button mobile-logout-button" type="button" aria-label="退出登录" onClick={onLogout}>
+          <LogOut aria-hidden="true" size={20} />
+        </button>
       </div>
 
       <main id="main-content" className="main-content" tabIndex={-1}>
