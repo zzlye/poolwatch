@@ -9,24 +9,28 @@ import { metricLabels, targetKindLabels } from '../types'
 
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
 
+const newAPISubscriptionThreshold: ThresholdDraft = {
+  key: 'subscription_balance',
+  label: '订阅余额',
+  value: '20',
+  unit: '站点单位'
+}
+
 const thresholdsByKind: Record<TargetKind, ThresholdDraft[]> = {
-  new_api: [
-    { key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位' },
-    { key: 'subscription_balance', label: '订阅余额', value: '20', unit: '站点单位' }
-  ],
+  new_api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位' }],
   sub2api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: 'USD' }],
   chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次' }],
   custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个' }]
 }
 
-function makeDraft(kind: TargetKind = 'new_api'): TargetDraft {
+function makeDraft(kind: TargetKind = 'new_api', checkIntervalMinutes = 5): TargetDraft {
   return {
     name: '',
     kind,
     baseUrl: '',
     topupUrl: '',
     enabled: true,
-    checkIntervalMinutes: 5,
+    checkIntervalMinutes,
     username: '',
     email: '',
     password: '',
@@ -153,10 +157,10 @@ function SecretField({ label, value, show, editing, optional, onChange, onToggle
   )
 }
 
-function WizardForm({ existing }: { existing?: Target }) {
+function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Target; defaultCheckIntervalMinutes: number }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [draft, setDraft] = useState<TargetDraft>(() => existing ? targetToDraft(existing) : makeDraft())
+  const [draft, setDraft] = useState<TargetDraft>(() => existing ? targetToDraft(existing) : makeDraft('new_api', defaultCheckIntervalMinutes))
   const [step, setStep] = useState(0)
   const [error, setError] = useState('')
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null)
@@ -164,6 +168,16 @@ function WizardForm({ existing }: { existing?: Target }) {
   const editing = Boolean(existing)
 
   const update = (patch: Partial<TargetDraft>) => setDraft((current) => ({ ...current, ...patch }))
+  const subscriptionMonitoringEnabled = draft.thresholds.some((item) => item.key === 'subscription_balance')
+  const setSubscriptionMonitoring = (enabled: boolean) => {
+    setDraft((current) => {
+      if (!enabled) {
+        return { ...current, thresholds: current.thresholds.filter((item) => item.key !== 'subscription_balance') }
+      }
+      if (current.thresholds.some((item) => item.key === 'subscription_balance')) return current
+      return { ...current, thresholds: [...current.thresholds, { ...newAPISubscriptionThreshold }] }
+    })
+  }
   const changeKind = (kind: TargetKind, preserveDetectionMessage = false) => {
     const candidate = getTopupCandidate(draft.baseUrl, kind)
     setDraft((current) => ({ ...current, kind, thresholds: thresholdsByKind[kind].map((item) => ({ ...item })), topupUrl: candidate, authType: kind === 'custom' ? 'none' : current.authType }))
@@ -273,6 +287,15 @@ function WizardForm({ existing }: { existing?: Target }) {
             </div>
           ) : null}
           <div className="threshold-list">
+            {draft.kind === 'new_api' ? (
+              <label className="toggle-row">
+                <input type="checkbox" checked={subscriptionMonitoringEnabled} onChange={(event) => setSubscriptionMonitoring(event.target.checked)} />
+                <span>
+                  <strong>监控订阅额度</strong>
+                  <small>关闭后不读取订阅数据，也不会产生订阅额度告警。阈值设为 0 时，额度等于 0 仍会告警。</small>
+                </span>
+              </label>
+            ) : null}
             {draft.thresholds.map((threshold, index) => (
               <div className="threshold-row" key={`${threshold.key}-${index}`}>
                 {draft.kind === 'custom' ? <label className="field"><span>指标名称</span><input value={threshold.label} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item) })} /></label> : <div className="threshold-label"><span>{metricLabels[threshold.key]}</span><small>{threshold.key}</small></div>}
@@ -312,14 +335,21 @@ function WizardForm({ existing }: { existing?: Target }) {
 
 export default function TargetWizardPage() {
   const { id } = useParams()
+  const [createSettingsReady, setCreateSettingsReady] = useState(false)
   const targetQuery = useQuery({ queryKey: ['target', id], queryFn: () => api.target(id!), enabled: Boolean(id) })
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: !id, refetchOnMount: 'always' })
+  useEffect(() => {
+    if (!id && settingsQuery.data && !settingsQuery.isFetching) setCreateSettingsReady(true)
+  }, [id, settingsQuery.data, settingsQuery.isFetching])
   if (id && targetQuery.isPending) return <LoadingView label="正在读取渠道配置" />
   if (id && targetQuery.isError) return <ErrorView message={targetQuery.error.message} onRetry={() => void targetQuery.refetch()} />
+  if (!id && settingsQuery.isError && !settingsQuery.data) return <ErrorView message={settingsQuery.error.message} onRetry={() => void settingsQuery.refetch()} />
+  if (!id && !createSettingsReady) return <LoadingView label="正在读取默认检测设置" />
 
   return (
     <div className="page-stack narrow-page">
       <PageHeader title={id ? '编辑渠道' : '添加渠道'} description={id ? '秘密字段留空时会保留服务器中原有的值。' : '完成四步设置后，服务器会开始定时检测。'} actions={<Link className="button ghost" to={id ? `/targets/${id}` : '/targets'}><ArrowLeft aria-hidden="true" size={18} />返回</Link>} />
-      <WizardForm key={targetQuery.data?.id ?? 'new'} existing={targetQuery.data} />
+      <WizardForm key={targetQuery.data?.id ?? 'new'} existing={targetQuery.data} defaultCheckIntervalMinutes={settingsQuery.data?.defaultCheckIntervalMinutes ?? 5} />
     </div>
   )
 }

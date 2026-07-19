@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,6 +140,25 @@ func (s *Service) CheckTarget(ctx context.Context, targetID string) error {
 	return s.runTarget(ctx, targetID)
 }
 
+// LockTarget 等待并独占一个渠道，供配置更新与检测共享同一把渠道锁。
+func (s *Service) LockTarget(ctx context.Context, targetID string) (func(), error) {
+	if s.acquireTarget(targetID) {
+		return func() { s.releaseTarget(targetID) }, nil
+	}
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if s.acquireTarget(targetID) {
+				return func() { s.releaseTarget(targetID) }, nil
+			}
+		}
+	}
+}
+
 // TestConfig 运行尚未保存的配置，不写入历史或触发告警，并临时返回自定义响应样本。
 func (s *Service) TestConfig(ctx context.Context, target monitor.TargetConfig) (monitor.Snapshot, any, error) {
 	target.AllowPrivateNetwork = s.allowPrivateTargets
@@ -225,6 +245,19 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
 	defer cancel()
 	snapshot, checkErr := s.runner.Run(timeoutContext, runtimeConfig)
+	currentTarget, reloadErr := s.store.TargetByID(ctx, target.ID)
+	if errors.Is(reloadErr, sql.ErrNoRows) {
+		// 检测期间渠道已删除，旧结果不再具有保存意义。
+		return nil
+	}
+	if reloadErr != nil {
+		return reloadErr
+	}
+	if targetMonitoringConfigChanged(target, currentTarget) {
+		// 检测期间渠道配置已更新，丢弃旧配置产生的结果，避免重新写入已取消的指标和告警。
+		return nil
+	}
+	target = currentTarget
 	if checkErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -256,6 +289,14 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 	}
 	s.onSnapshot(target.ID)
 	return nil
+}
+
+func targetMonitoringConfigChanged(previous, current store.Target) bool {
+	return previous.Kind != current.Kind ||
+		previous.BaseURL != current.BaseURL ||
+		previous.ConfigJSON != current.ConfigJSON ||
+		previous.CredentialsEnc != current.CredentialsEnc ||
+		previous.Enabled != current.Enabled
 }
 
 func (s *Service) runtimeConfig(target store.Target) (monitor.TargetConfig, error) {

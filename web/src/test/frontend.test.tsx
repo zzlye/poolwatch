@@ -14,7 +14,7 @@ import { ThemeProvider, useTheme } from '../hooks/useTheme'
 import { useRealtime } from '../hooks/useRealtime'
 import { api } from '../api/client'
 import { enablePush } from '../lib/push'
-import type { Snapshot, Target } from '../types'
+import type { Settings, Snapshot, Target } from '../types'
 
 function createQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
@@ -49,13 +49,29 @@ describe('跨端导航', () => {
 })
 
 describe('渠道向导', () => {
-  it('完成基本信息后进入登录步骤', () => {
+  const defaultSettings: Settings = {
+    productName: '号池监控',
+    historyRetentionDays: 7,
+    defaultCheckIntervalMinutes: 5,
+    allowPrivateTargets: false,
+    totpEnabled: false
+  }
+
+  beforeEach(() => {
+    vi.spyOn(api, 'settings').mockResolvedValue(defaultSettings)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('完成基本信息后进入登录步骤', async () => {
     renderWithClient(
       <MemoryRouter initialEntries={['/targets/new']}>
         <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
       </MemoryRouter>
     )
-    fireEvent.change(screen.getByLabelText(/渠道名称/), { target: { value: '测试渠道' } })
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '测试渠道' } })
     fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     expect(screen.getByRole('heading', { name: '登录与认证' })).toBeInTheDocument()
@@ -69,7 +85,7 @@ describe('渠道向导', () => {
         <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
       </MemoryRouter>
     )
-    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://sub.example.com' } })
+    fireEvent.change(await screen.findByLabelText(/站点地址/), { target: { value: 'https://sub.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '自动识别' }))
     await waitFor(() => expect(screen.getByText('已识别为 Sub2API')).toBeInTheDocument())
     expect(screen.getByLabelText('渠道类型')).toHaveValue('sub2api')
@@ -107,6 +123,73 @@ describe('渠道向导', () => {
     expect(draft.password).toBe('')
     expect(draft.accessToken).toBe('')
     expect(draft.totpSecret).toBe('')
+  })
+
+  it('可以关闭 New API 订阅监控且保留零阈值语义', async () => {
+    const create = vi.spyOn(api, 'createTarget').mockResolvedValue({
+      id: 'new-api-1',
+      name: '只监控钱包',
+      kind: 'new_api',
+      baseUrl: 'https://api.example.com',
+      status: 'unknown',
+      statusText: '等待检测',
+      enabled: true,
+      checkIntervalMinutes: 5,
+      authConfigured: false,
+      metrics: [{ key: 'wallet_balance', label: '钱包余额', value: '0', unit: '站点单位', threshold: '0', status: 'unknown' }]
+    })
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '只监控钱包' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    const subscriptionToggle = screen.getByRole('checkbox', { name: /监控订阅额度/ })
+    expect(subscriptionToggle).not.toBeChecked()
+    fireEvent.click(subscriptionToggle)
+    expect(screen.getByText('subscription_balance')).toBeInTheDocument()
+    fireEvent.click(subscriptionToggle)
+    expect(screen.queryByText('subscription_balance')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('告警阈值'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加渠道' }))
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce())
+    expect(create.mock.calls[0][0].thresholds).toEqual([
+      expect.objectContaining({ key: 'wallet_balance', value: '0' })
+    ])
+    expect(create.mock.calls[0][0].thresholds.some((item) => item.key === 'subscription_balance')).toBe(false)
+    create.mockRestore()
+  })
+
+  it('即使已有旧缓存也等待刷新后使用保存的默认检测间隔', async () => {
+    let resolveSettings: ((value: Settings) => void) | undefined
+    vi.mocked(api.settings).mockImplementation(() => new Promise((resolve) => { resolveSettings = resolve }))
+    const client = createQueryClient()
+    client.setQueryData(['settings'], defaultSettings)
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/targets/new']}>
+          <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    expect(screen.getByText('正在读取默认检测设置')).toBeInTheDocument()
+    await act(async () => {
+      resolveSettings?.({ ...defaultSettings, defaultCheckIntervalMinutes: 10 })
+    })
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '十分钟检测' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getByLabelText('检测间隔（分钟）')).toHaveValue(10)
   })
 })
 
@@ -179,7 +262,7 @@ describe('主题和实时事件', () => {
     expect(window.localStorage.getItem('pool-monitor-theme')).toBe('dark')
   })
 
-  it('收到快照事件后刷新监控缓存并在卸载时关闭连接', () => {
+  it('收到快照或渠道更新事件后刷新对应缓存并在卸载时关闭连接', () => {
     const listeners = new Map<string, EventListener>()
     const close = vi.fn()
     class FakeEventSource {
@@ -195,6 +278,8 @@ describe('主题和实时事件', () => {
     act(() => listeners.get('snapshot')?.(new Event('snapshot')))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['dashboard'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['history'] })
+    act(() => listeners.get('target.updated')?.(new Event('target.updated')))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['alerts'] })
     view.unmount()
     expect(close).toHaveBeenCalledOnce()
   })

@@ -10,6 +10,15 @@ import (
 const targetColumns = `id, name, kind, base_url, enabled, poll_interval_seconds, recharge_url,
 	config_json, credentials_enc, status, failure_count, last_error, last_checked_at, created_at, updated_at`
 
+// TargetMonitoringUpdateMode 描述更新渠道时如何同步处理既有监控数据。
+type TargetMonitoringUpdateMode string
+
+const (
+	TargetMonitoringKeep         TargetMonitoringUpdateMode = "keep"
+	TargetMonitoringResetHistory TargetMonitoringUpdateMode = "reset_history"
+	TargetMonitoringRefresh      TargetMonitoringUpdateMode = "refresh"
+)
+
 // CreateTarget 新增一个渠道，敏感凭据必须在调用前完成加密。
 func (s *Store) CreateTarget(ctx context.Context, target Target) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO targets(
@@ -29,7 +38,15 @@ func (s *Store) CreateTarget(ctx context.Context, target Target) error {
 
 // UpdateTarget 更新渠道配置，检测状态字段保持由调度器管理。
 func (s *Store) UpdateTarget(ctx context.Context, target Target) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE targets SET
+	return updateTarget(ctx, s.db, target)
+}
+
+type targetExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func updateTarget(ctx context.Context, executor targetExecutor, target Target) error {
+	result, err := executor.ExecContext(ctx, `UPDATE targets SET
 		name = ?, kind = ?, base_url = ?, enabled = ?, poll_interval_seconds = ?, recharge_url = ?,
 		config_json = ?, credentials_enc = ?, updated_at = ?
 		WHERE id = ?`,
@@ -40,6 +57,32 @@ func (s *Store) UpdateTarget(ctx context.Context, target Target) error {
 		return fmt.Errorf("更新渠道失败: %w", err)
 	}
 	return requireAffected(result, "渠道不存在")
+}
+
+// UpdateTargetAndMonitoring 在同一事务中更新渠道配置与关联监控状态，避免只完成其中一部分。
+func (s *Store) UpdateTargetAndMonitoring(ctx context.Context, target Target, mode TargetMonitoringUpdateMode, removedMetricKeys []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateTarget(ctx, tx, target); err != nil {
+		return err
+	}
+	switch mode {
+	case TargetMonitoringKeep:
+	case TargetMonitoringResetHistory:
+		if err := resetTargetMonitoringTx(ctx, tx, target.ID, target.UpdatedAt); err != nil {
+			return err
+		}
+	case TargetMonitoringRefresh:
+		if err := refreshTargetMonitoringConfigTx(ctx, tx, target.ID, removedMetricKeys, target.UpdatedAt); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("渠道监控更新模式无效")
+	}
+	return tx.Commit()
 }
 
 // TargetByID 读取单个渠道。
@@ -123,6 +166,13 @@ func (s *Store) ResetTargetMonitoring(ctx context.Context, id string, updatedAt 
 		return err
 	}
 	defer tx.Rollback()
+	if err := resetTargetMonitoringTx(ctx, tx, id, updatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func resetTargetMonitoringTx(ctx context.Context, tx *sql.Tx, id string, updatedAt time.Time) error {
 	for _, query := range []string{
 		`DELETE FROM snapshots WHERE target_id = ?`,
 		`DELETE FROM alerts WHERE target_id = ?`,
@@ -140,7 +190,39 @@ func (s *Store) ResetTargetMonitoring(ctx context.Context, id string, updatedAt 
 	if err := requireAffected(result, "渠道不存在"); err != nil {
 		return err
 	}
+	return nil
+}
+
+// RefreshTargetMonitoringConfig 在保留历史快照的同时清理已取消指标的告警，并安排渠道尽快重检。
+func (s *Store) RefreshTargetMonitoringConfig(ctx context.Context, id string, removedMetricKeys []string, updatedAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := refreshTargetMonitoringConfigTx(ctx, tx, id, removedMetricKeys, updatedAt); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func refreshTargetMonitoringConfigTx(ctx context.Context, tx *sql.Tx, id string, removedMetricKeys []string, updatedAt time.Time) error {
+	for _, metricKey := range removedMetricKeys {
+		if _, err := tx.ExecContext(ctx, `UPDATE alerts SET state = 'resolved', recovered_at = ?
+			WHERE target_id = ? AND type = 'threshold' AND metric_key = ? AND state IN ('open', 'acknowledged')`,
+			formatTime(updatedAt), id, metricKey); err != nil {
+			return fmt.Errorf("清理已取消指标告警失败: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE targets SET status = 'unknown', failure_count = 0,
+		last_error = '', last_checked_at = NULL, updated_at = ? WHERE id = ?`, formatTime(updatedAt), id)
+	if err != nil {
+		return fmt.Errorf("安排渠道重新检测失败: %w", err)
+	}
+	if err := requireAffected(result, "渠道不存在"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CountTargetsByStatus 汇总渠道状态数量。

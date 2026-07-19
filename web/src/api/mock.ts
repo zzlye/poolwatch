@@ -5,9 +5,11 @@ import type {
   DetectTargetResult,
   HistoryResult,
   PushInfo,
+  SanitizedAccount,
   Settings,
   Target,
   TargetDraft,
+  TargetStatus,
   TestConnectionResult,
   TotpSetup
 } from '../types'
@@ -15,6 +17,20 @@ import { targetKindLabels } from '../types'
 
 const now = Date.now()
 const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString()
+
+function makeMockChatAccounts(total: number): SanitizedAccount[] {
+  const types = ['free', 'plus', 'team']
+  const statuses: TargetStatus[] = ['healthy', 'warning', 'error', 'disabled']
+  // 模拟足够多的账号，便于在独立前端验收筛选和分页。
+  return Array.from({ length: total }, (_, index) => ({
+    id: `account-${index + 1}`,
+    email: `demo${String(index + 1).padStart(2, '0')}***@example.com`,
+    type: types[index % types.length],
+    status: statuses[index % statuses.length],
+    imageQuota: String((index * 7) % 45),
+    recoveryAt: statuses[index % statuses.length] === 'healthy' ? undefined : new Date(now + (index + 1) * 12 * 60_000).toISOString()
+  }))
+}
 
 let targets: Target[] = [
   {
@@ -70,11 +86,7 @@ let targets: Target[] = [
       { key: 'limited_accounts', label: '限流账号', value: '2', unit: '个', status: 'warning' },
       { key: 'error_accounts', label: '异常账号', value: '0', unit: '个', status: 'healthy' }
     ],
-    accounts: [
-      { id: 'a-1', email: 'li***@example.com', type: 'plus', status: 'healthy', imageQuota: '42' },
-      { id: 'a-2', email: 'zh***@example.com', type: 'team', status: 'warning', imageQuota: '0', recoveryAt: new Date(now + 38 * 60_000).toISOString() },
-      { id: 'a-3', email: 'wa***@example.com', type: 'plus', status: 'healthy', imageQuota: '38' }
-    ]
+    accounts: makeMockChatAccounts(23)
   }
 ]
 

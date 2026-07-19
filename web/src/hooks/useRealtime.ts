@@ -19,8 +19,13 @@ export function useRealtime(enabled: boolean): void {
       void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       void queryClient.invalidateQueries({ queryKey: ['alerts'] })
     }
+    const refreshTargetConfiguration = () => {
+      refreshTargets()
+      // 渠道配置变化可能关闭某个告警指标，告警页也要同步刷新。
+      void queryClient.invalidateQueries({ queryKey: ['alerts'] })
+    }
     source.addEventListener('snapshot', refreshTargets)
-    source.addEventListener('target.updated', refreshTargets)
+    source.addEventListener('target.updated', refreshTargetConfiguration)
     source.addEventListener('alert', refreshAlerts)
     source.addEventListener('settings.updated', () => void queryClient.invalidateQueries({ queryKey: ['settings'] }))
 

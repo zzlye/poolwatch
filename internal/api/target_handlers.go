@@ -82,7 +82,23 @@ func (s *Server) handleCreateTarget(response http.ResponseWriter, request *http.
 }
 
 func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.Request) {
-	existing, err := s.dependencies.Store.TargetByID(request.Context(), request.PathValue("id"))
+	var draft targetDraft
+	if err := decodeJSON(response, request, &draft); err != nil {
+		writeAPIError(response, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := request.PathValue("id")
+	unlock, err := s.dependencies.Scheduler.LockTarget(request.Context(), id)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeAPIError(response, http.StatusGatewayTimeout, "等待当前渠道检测结束超时")
+		return
+	}
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "锁定渠道失败")
+		return
+	}
+	defer unlock()
+	existing, err := s.dependencies.Store.TargetByID(request.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAPIError(response, http.StatusNotFound, "渠道不存在")
 		return
@@ -91,25 +107,28 @@ func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusInternalServerError, "读取渠道失败")
 		return
 	}
-	var draft targetDraft
-	if err := decodeJSON(response, request, &draft); err != nil {
-		writeAPIError(response, http.StatusBadRequest, err.Error())
-		return
-	}
 	target, _, err := s.buildTarget(request.Context(), draft, &existing, false)
 	if err != nil {
 		writeAPIError(response, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.dependencies.Store.UpdateTarget(request.Context(), target); err != nil {
-		writeAPIError(response, http.StatusInternalServerError, "更新渠道失败")
-		return
-	}
-	if existing.Kind != target.Kind || existing.BaseURL != target.BaseURL {
-		if err := s.dependencies.Store.ResetTargetMonitoring(request.Context(), target.ID, time.Now().UTC()); err != nil {
-			writeAPIError(response, http.StatusInternalServerError, "重置渠道检测历史失败")
+	monitoringIdentityChanged := existing.Kind != target.Kind || existing.BaseURL != target.BaseURL
+	monitoringConfigChanged := existing.ConfigJSON != target.ConfigJSON
+	monitoringMode := store.TargetMonitoringKeep
+	removedMetricKeys := make([]string, 0)
+	if monitoringIdentityChanged {
+		monitoringMode = store.TargetMonitoringResetHistory
+	} else if monitoringConfigChanged {
+		monitoringMode = store.TargetMonitoringRefresh
+		removedMetricKeys, err = removedThresholdKeys(existing.ConfigJSON, target.ConfigJSON)
+		if err != nil {
+			writeAPIError(response, http.StatusInternalServerError, "读取原渠道监控配置失败")
 			return
 		}
+	}
+	if err := s.dependencies.Store.UpdateTargetAndMonitoring(request.Context(), target, monitoringMode, removedMetricKeys); err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "更新渠道失败")
+		return
 	}
 	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.updated", target.ID, "更新渠道", time.Now().UTC())
 	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": target.ID})
@@ -122,8 +141,36 @@ func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.
 	writeJSON(response, http.StatusOK, mapped)
 }
 
+func removedThresholdKeys(previousJSON, currentJSON string) ([]string, error) {
+	var previous storedTargetConfig
+	if err := json.Unmarshal([]byte(previousJSON), &previous); err != nil {
+		return nil, err
+	}
+	var current storedTargetConfig
+	if err := json.Unmarshal([]byte(currentJSON), &current); err != nil {
+		return nil, err
+	}
+	removed := make([]string, 0)
+	for key := range previous.Thresholds {
+		if _, exists := current.Thresholds[key]; !exists {
+			removed = append(removed, string(key))
+		}
+	}
+	return removed, nil
+}
+
 func (s *Server) handleDeleteTarget(response http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	unlock, err := s.dependencies.Scheduler.LockTarget(request.Context(), id)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeAPIError(response, http.StatusGatewayTimeout, "等待当前渠道检测结束超时")
+		return
+	}
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "锁定渠道失败")
+		return
+	}
+	defer unlock()
 	if err := s.dependencies.Store.DeleteTarget(request.Context(), id); err != nil {
 		if store.IsNotFound(err) {
 			writeAPIError(response, http.StatusNotFound, "渠道不存在")
@@ -544,22 +591,35 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		if err := json.Unmarshal([]byte(snapshot.MetricsJSON), &metrics); err != nil {
 			return targetResponse{}, err
 		}
+		visibleMetrics := make([]monitor.Metric, 0, len(metrics))
 		for index := range metrics {
+			// 快照中的阈值属于历史配置，响应必须以渠道当前配置为准。
+			metrics[index].Threshold = nil
 			if threshold, exists := config.Thresholds[metrics[index].Key]; exists {
 				copyValue := threshold
 				metrics[index].Threshold = &copyValue
 			}
+			if target.Kind == string(monitor.TargetKindNewAPI) && metrics[index].Key == monitor.MetricSubscriptionBalance && !config.NewAPI.IncludeSubscription {
+				continue
+			}
+			visibleMetrics = append(visibleMetrics, metrics[index])
 		}
-		result.Metrics = mapMonitorMetrics(metrics, status)
+		result.Metrics = mapMonitorMetrics(visibleMetrics, status)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return targetResponse{}, err
 	}
-	if len(result.Metrics) == 0 {
-		for _, meta := range config.ThresholdMeta {
-			result.Metrics = append(result.Metrics, metricResponse{
-				Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, Threshold: meta.Value, Status: string(monitor.TargetStatusUnknown),
-			})
+	visibleMetricKeys := make(map[string]bool, len(result.Metrics))
+	for _, metric := range result.Metrics {
+		visibleMetricKeys[metric.Key] = true
+	}
+	for _, meta := range config.ThresholdMeta {
+		if visibleMetricKeys[meta.Key] {
+			continue
 		}
+		// 尚未读取到的已配置指标仍需返回，确保编辑页面不会意外关闭监控项。
+		result.Metrics = append(result.Metrics, metricResponse{
+			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, Threshold: meta.Value, Status: string(monitor.TargetStatusUnknown),
+		})
 	}
 	if target.Kind == string(monitor.TargetKindChatGPT2API) {
 		accounts, err := s.dependencies.Store.ListChatAccounts(ctx, target.ID)

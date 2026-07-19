@@ -134,6 +134,105 @@ func TestCallerCancellationDoesNotCountAsChannelFailure(t *testing.T) {
 	}
 }
 
+func TestConfigurationUpdateDiscardsRunningCheckResult(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	runner := &blockingRunner{started: make(chan monitor.TargetConfig, 1), release: make(chan struct{})}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- service.CheckTarget(ctx, target.ID) }()
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("检测器未启动")
+	}
+	updated, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("读取渠道失败: %v", err)
+	}
+	updated.ConfigJSON = `{"thresholds":{"wallet_balance":"5"}}`
+	updated.UpdatedAt = time.Now().UTC().Add(time.Second)
+	if err := database.UpdateTarget(ctx, updated); err != nil {
+		t.Fatalf("更新检测中的渠道配置失败: %v", err)
+	}
+	if err := database.RefreshTargetMonitoringConfig(ctx, target.ID, nil, updated.UpdatedAt); err != nil {
+		t.Fatalf("安排新配置重新检测失败: %v", err)
+	}
+	close(runner.release)
+	if err := <-done; err != nil {
+		t.Fatalf("旧检测结果应被安静丢弃: %v", err)
+	}
+
+	stored, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("读取更新后的渠道失败: %v", err)
+	}
+	if stored.Status != string(monitor.TargetStatusUnknown) || !stored.LastCheckedAt.IsZero() {
+		t.Fatalf("旧检测不应覆盖待重检状态: %#v", stored)
+	}
+	var snapshotCount int
+	if err := database.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshots WHERE target_id = ?`, target.ID).Scan(&snapshotCount); err != nil || snapshotCount != 0 {
+		t.Fatalf("旧检测不应保存快照: %d, %v", snapshotCount, err)
+	}
+	decrypted, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || strings.Contains(string(decrypted), "renewed-access-token") {
+		t.Fatalf("旧检测不应覆盖渠道凭据: %s, %v", decrypted, err)
+	}
+}
+
+func TestTargetLockWaitsUntilRunningCheckFinishes(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	runner := &blockingRunner{started: make(chan monitor.TargetConfig, 1), release: make(chan struct{})}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx := context.Background()
+	checkDone := make(chan error, 1)
+	go func() { checkDone <- service.CheckTarget(ctx, target.ID) }()
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("检测器未启动")
+	}
+
+	type lockResult struct {
+		unlock func()
+		err    error
+	}
+	locked := make(chan lockResult, 1)
+	go func() {
+		unlock, err := service.LockTarget(ctx, target.ID)
+		locked <- lockResult{unlock: unlock, err: err}
+	}()
+	select {
+	case result := <-locked:
+		if result.unlock != nil {
+			result.unlock()
+		}
+		t.Fatalf("检测尚未结束时不应取得配置锁: %v", result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(runner.release)
+	if err := <-checkDone; err != nil {
+		t.Fatalf("检测失败: %v", err)
+	}
+	select {
+	case result := <-locked:
+		if result.err != nil {
+			t.Fatalf("等待配置锁失败: %v", result.err)
+		}
+		if _, err := database.LatestSnapshot(ctx, target.ID); err != nil {
+			result.unlock()
+			t.Fatalf("取得配置锁前检测结果应已完整保存: %v", err)
+		}
+		result.unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("检测结束后未取得配置锁")
+	}
+}
+
 func schedulerFixture(t *testing.T) (*store.Store, *secure.Vault, store.Target) {
 	t.Helper()
 	database, err := store.Open(t.TempDir())

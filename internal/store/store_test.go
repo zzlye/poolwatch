@@ -84,3 +84,83 @@ func TestSnapshotLimitKeepsNewestPointsInAscendingOrder(t *testing.T) {
 		t.Fatalf("历史应保留最新数据并按时间升序返回: %#v", items)
 	}
 }
+
+func TestRefreshTargetMonitoringConfig保留历史并清理取消指标(t *testing.T) {
+	database, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 13, 0, 0, 0, time.UTC)
+	target := Target{
+		ID: "target_refresh_config", Name: "配置更新测试", Kind: "new_api", BaseURL: "https://example.com",
+		Enabled: true, PollIntervalSeconds: 300, ConfigJSON: "{}", Status: "warning", FailureCount: 2,
+		LastError: "旧错误", LastCheckedAt: now.Add(-time.Minute), CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+	}
+	if err := database.CreateTarget(ctx, target); err != nil {
+		t.Fatalf("创建渠道失败: %v", err)
+	}
+	if err := database.InsertSnapshot(ctx, &Snapshot{
+		TargetID: target.ID, ObservedAt: now.Add(-time.Minute), Status: "warning", MetricsJSON: "[]", DetailJSON: "{}",
+	}); err != nil {
+		t.Fatalf("保存历史快照失败: %v", err)
+	}
+	for _, alert := range []Alert{
+		{ID: "alert_subscription", TargetID: target.ID, Type: "threshold", MetricKey: "subscription_balance", State: "open", Title: "订阅余额不足", OpenedAt: now.Add(-time.Minute)},
+		{ID: "alert_wallet", TargetID: target.ID, Type: "threshold", MetricKey: "wallet_balance", State: "open", Title: "钱包余额不足", OpenedAt: now.Add(-time.Minute)},
+	} {
+		if err := database.CreateAlert(ctx, alert); err != nil {
+			t.Fatalf("创建告警失败: %v", err)
+		}
+	}
+
+	if err := database.RefreshTargetMonitoringConfig(ctx, target.ID, []string{"subscription_balance"}, now); err != nil {
+		t.Fatalf("刷新渠道监控配置失败: %v", err)
+	}
+	updated, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("读取更新后的渠道失败: %v", err)
+	}
+	if updated.Status != "unknown" || updated.FailureCount != 0 || updated.LastError != "" || !updated.LastCheckedAt.IsZero() {
+		t.Fatalf("渠道应进入待检测状态: %#v", updated)
+	}
+	if _, err := database.LatestSnapshot(ctx, target.ID); err != nil {
+		t.Fatalf("配置更新不应删除历史快照: %v", err)
+	}
+	if _, err := database.ActiveAlert(ctx, target.ID, "threshold", "subscription_balance"); err != sql.ErrNoRows {
+		t.Fatalf("已取消指标的活跃告警应被清理: %v", err)
+	}
+	if _, err := database.ActiveAlert(ctx, target.ID, "threshold", "wallet_balance"); err != nil {
+		t.Fatalf("仍在监控的指标告警应继续保留: %v", err)
+	}
+}
+
+func TestUpdateTargetAndMonitoring任一步失败都会回滚(t *testing.T) {
+	database, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 14, 0, 0, 0, time.UTC)
+	target := Target{
+		ID: "target_atomic_update", Name: "原名称", Kind: "new_api", BaseURL: "https://example.com",
+		Enabled: true, PollIntervalSeconds: 300, ConfigJSON: "{}", Status: "healthy", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateTarget(ctx, target); err != nil {
+		t.Fatalf("创建渠道失败: %v", err)
+	}
+	target.Name = "不应保存的新名称"
+	target.UpdatedAt = now.Add(time.Minute)
+	if err := database.UpdateTargetAndMonitoring(ctx, target, TargetMonitoringUpdateMode("invalid"), nil); err == nil {
+		t.Fatal("无效监控更新模式应返回错误")
+	}
+	stored, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("读取回滚后的渠道失败: %v", err)
+	}
+	if stored.Name != "原名称" || stored.Status != "healthy" {
+		t.Fatalf("事务失败后不应留下部分更新: %#v", stored)
+	}
+}

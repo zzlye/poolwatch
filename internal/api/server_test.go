@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -102,6 +104,73 @@ func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &created); err != nil || created.ID == "" || !created.AuthConfigured {
 		t.Fatalf("解析新渠道失败: %#v, %v", created, err)
 	}
+	storedWithoutSubscription, err := database.TargetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取未启用订阅监控的渠道失败: %v", err)
+	}
+	var configWithoutSubscription storedTargetConfig
+	if err := json.Unmarshal([]byte(storedWithoutSubscription.ConfigJSON), &configWithoutSubscription); err != nil {
+		t.Fatalf("解析渠道监控配置失败: %v", err)
+	}
+	if configWithoutSubscription.NewAPI.IncludeSubscription {
+		t.Fatal("未提交订阅阈值时不应读取订阅额度")
+	}
+	if _, exists := configWithoutSubscription.Thresholds[monitor.MetricSubscriptionBalance]; exists {
+		t.Fatal("未提交订阅阈值时不应保存订阅告警配置")
+	}
+	if threshold, exists := configWithoutSubscription.Thresholds[monitor.MetricWalletBalance]; !exists || !threshold.Equal(decimal.NewFromInt(10)) {
+		t.Fatalf("钱包阈值应保持有效: %s", threshold)
+	}
+	oldSubscriptionThreshold := decimal.Zero
+	oldMetrics, err := json.Marshal([]monitor.Metric{
+		{Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(5), Unit: "元"},
+		{Key: monitor.MetricSubscriptionBalance, Label: "订阅余额", Value: decimal.Zero, Unit: "元", Threshold: &oldSubscriptionThreshold},
+	})
+	if err != nil {
+		t.Fatalf("编码旧渠道快照失败: %v", err)
+	}
+	if err := database.InsertSnapshot(context.Background(), &store.Snapshot{
+		TargetID: created.ID, ObservedAt: time.Now().UTC().Add(-time.Minute), Status: string(monitor.TargetStatusWarning), MetricsJSON: string(oldMetrics),
+	}); err != nil {
+		t.Fatalf("保存旧渠道快照失败: %v", err)
+	}
+	status, body = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/targets/"+created.ID, nil, "")
+	if status != http.StatusOK || strings.Contains(body, "subscription_balance") || strings.Contains(body, `"threshold":"0"`) {
+		t.Fatalf("关闭订阅监控后仍返回旧订阅指标或阈值: %d %s", status, body)
+	}
+	createBody["thresholds"] = []map[string]string{
+		{"key": "wallet_balance", "label": "钱包余额", "value": "10", "unit": "元"},
+		{"key": "subscription_balance", "label": "订阅余额", "value": "0", "unit": "元"},
+	}
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/targets/"+created.ID, createBody, "")
+	if status != http.StatusOK {
+		t.Fatalf("启用订阅监控失败: %d %s", status, body)
+	}
+	walletOnlyMetrics, err := json.Marshal([]monitor.Metric{
+		{Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(5), Unit: "元"},
+	})
+	if err != nil {
+		t.Fatalf("编码缺少订阅数据的快照失败: %v", err)
+	}
+	if err := database.InsertSnapshot(context.Background(), &store.Snapshot{
+		TargetID: created.ID, ObservedAt: time.Now().UTC().Add(-30 * time.Second), Status: string(monitor.TargetStatusHealthy), MetricsJSON: string(walletOnlyMetrics),
+	}); err != nil {
+		t.Fatalf("保存缺少订阅数据的快照失败: %v", err)
+	}
+	status, body = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/targets/"+created.ID, nil, "")
+	if status != http.StatusOK || !strings.Contains(body, `"key":"subscription_balance"`) || !strings.Contains(body, `"threshold":"0"`) {
+		t.Fatalf("已配置但尚未读取到的订阅指标未保留: %d %s", status, body)
+	}
+	if err := database.CreateAlert(context.Background(), store.Alert{
+		ID: "alert_removed_subscription", TargetID: created.ID, Type: string(monitor.AlertTypeQuotaLow),
+		MetricKey: string(monitor.MetricSubscriptionBalance), State: "open", Title: "订阅余额不足", OpenedAt: time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("创建待清理的订阅告警失败: %v", err)
+	}
+	if err := database.UpdateTargetCheck(context.Background(), created.ID, string(monitor.TargetStatusWarning), 2, "旧检测错误", time.Now().UTC()); err != nil {
+		t.Fatalf("准备旧渠道状态失败: %v", err)
+	}
+	createBody["thresholds"] = []map[string]string{{"key": "wallet_balance", "label": "钱包余额", "value": "10", "unit": "元"}}
 
 	createBody["name"] = "主站更新"
 	createBody["accessToken"] = ""
@@ -113,6 +182,15 @@ func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	stored, err := database.TargetByID(context.Background(), created.ID)
 	if err != nil {
 		t.Fatalf("读取已保存渠道失败: %v", err)
+	}
+	if stored.Status != string(monitor.TargetStatusUnknown) || stored.FailureCount != 0 || stored.LastError != "" || !stored.LastCheckedAt.IsZero() {
+		t.Fatalf("取消订阅监控后渠道应等待立即重检: %#v", stored)
+	}
+	if _, err := database.ActiveAlert(context.Background(), created.ID, string(monitor.AlertTypeQuotaLow), string(monitor.MetricSubscriptionBalance)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("取消订阅监控后不应保留订阅告警: %v", err)
+	}
+	if _, err := database.LatestSnapshot(context.Background(), created.ID); err != nil {
+		t.Fatalf("取消订阅监控不应删除历史快照: %v", err)
 	}
 	credentialsJSON, err := vault.Decrypt(stored.CredentialsEnc)
 	if err != nil || !strings.Contains(string(credentialsJSON), "secret-access-token") {

@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: poolwatch:local
+    image: ${POOLWATCH_IMAGE:-poolwatch:local}
     restart: unless-stopped
     init: true
     environment:

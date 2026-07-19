@@ -28,7 +28,14 @@ export default function SettingsPage() {
 
   useEffect(() => { if (settingsQuery.data) setForm(settingsQuery.data) }, [settingsQuery.data])
 
-  const saveMutation = useMutation({ mutationFn: (value: Settings) => api.updateSettings(value), onSuccess: (value) => { setForm(value); void queryClient.invalidateQueries({ queryKey: ['settings'] }) } })
+  const saveMutation = useMutation({
+    mutationFn: (value: Settings) => api.updateSettings(value),
+    onSuccess: (value) => {
+      setForm(value)
+      // 保存接口返回服务器最终设置，立即写入共享缓存，避免新增渠道读到旧默认值。
+      queryClient.setQueryData(['settings'], value)
+    }
+  })
   const pushMutation = useMutation({
     mutationFn: () => enablePush(pushQuery.data?.vapidPublicKey ?? '', deviceName),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['push'] })

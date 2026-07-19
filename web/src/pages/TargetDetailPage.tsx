@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle2, Clock3, Edit3, ExternalLink, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
+import { AccountPoolView } from '../components/AccountPoolView'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
@@ -102,7 +103,7 @@ export default function TargetDetailPage() {
       {target.kind === 'chatgpt2api' ? (
         <section className="content-section" aria-labelledby="account-title">
           <div className="section-heading"><div><h2 id="account-title">号池账号状态</h2><p>仅显示脱敏邮箱、类型、状态、额度与恢复时间。</p></div></div>
-          {target.accounts?.length ? <><div className="table-wrap desktop-table"><table><thead><tr><th scope="col">账号</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">图片额度</th><th scope="col">预计恢复</th></tr></thead><tbody>{target.accounts.map((account) => <tr key={account.id}><td>{account.email}</td><td>{account.type}</td><td><StatusPill status={account.status} /></td><td>{account.imageQuota} 次</td><td>{account.recoveryAt ? formatDateTime(account.recoveryAt) : '—'}</td></tr>)}</tbody></table></div><div className="account-list mobile-list">{target.accounts.map((account) => <article key={account.id}><div><strong>{account.email}</strong><span>{account.type}</span></div><StatusPill status={account.status} /><dl><div><dt>图片额度</dt><dd>{account.imageQuota} 次</dd></div><div><dt>预计恢复</dt><dd>{account.recoveryAt ? formatRelativeTime(account.recoveryAt) : '—'}</dd></div></dl></article>)}</div></> : <EmptyState title="暂无账号明细" description="配置管理员密钥后才能读取只读脱敏明细。" />}
+          {target.accounts?.length ? <AccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="配置管理员密钥后才能读取只读脱敏明细。" />}
         </section>
       ) : null}
 
