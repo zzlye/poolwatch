@@ -1,0 +1,49 @@
+name: poolwatch
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: poolwatch:local
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?请先生成 APP_ENCRYPTION_KEY}
+      SETUP_TOKEN: ${SETUP_TOKEN:?请先设置 SETUP_TOKEN}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      DATA_DIR: /data
+      LISTEN_ADDRESS: ":8080"
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    volumes:
+      - app-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-T",
+          "3",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/healthz",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
+
+volumes:
+  app-data:

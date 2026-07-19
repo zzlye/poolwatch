@@ -1,0 +1,29 @@
+# 版本控制与本地配置
+.git
+.gitignore
+.env
+.env.*
+
+# 本地数据与备份
+data
+backups
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# 依赖、构建产物与测试产物
+web/node_modules
+web/dist
+internal/webui/dist
+node_modules
+coverage
+playwright-report
+test-results
+
+# 运行镜像不需要的交付资料
+docs
+deploy
+scripts
+README.md
+docker-compose*.yml

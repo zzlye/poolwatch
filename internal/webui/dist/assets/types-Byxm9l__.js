@@ -1,0 +1,1 @@
+var e={new_api:`New API`,sub2api:`Sub2API`,chatgpt2api:`chatgpt2api`,custom:`自定义 HTTP`},t={wallet_balance:`钱包余额`,subscription_balance:`订阅额度`,image_quota:`图片额度`,healthy_accounts:`正常账号`,limited_accounts:`限流账号`,error_accounts:`异常账号`,disabled_accounts:`禁用账号`};export{e as n,t};
