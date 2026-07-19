@@ -97,6 +97,16 @@ func (s *Store) UpdateTargetCheck(ctx context.Context, id, status string, failur
 	return requireAffected(result, "渠道不存在")
 }
 
+// UpdateTargetCredentials 保存适配器续期后的加密凭据。
+func (s *Store) UpdateTargetCredentials(ctx context.Context, id, credentialsEncrypted string, updatedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE targets SET credentials_enc = ?, updated_at = ? WHERE id = ?`,
+		credentialsEncrypted, formatTime(updatedAt), id)
+	if err != nil {
+		return fmt.Errorf("保存续期凭据失败: %w", err)
+	}
+	return requireAffected(result, "渠道不存在")
+}
+
 // DeleteTarget 删除渠道以及由外键关联的历史数据。
 func (s *Store) DeleteTarget(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id = ?`, id)
@@ -104,6 +114,33 @@ func (s *Store) DeleteTarget(ctx context.Context, id string) error {
 		return fmt.Errorf("删除渠道失败: %w", err)
 	}
 	return requireAffected(result, "渠道不存在")
+}
+
+// ResetTargetMonitoring 在渠道类型或地址变化后清除不再可比的检测数据。
+func (s *Store) ResetTargetMonitoring(ctx context.Context, id string, updatedAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		`DELETE FROM snapshots WHERE target_id = ?`,
+		`DELETE FROM alerts WHERE target_id = ?`,
+		`DELETE FROM chat_accounts WHERE target_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, query, id); err != nil {
+			return fmt.Errorf("重置渠道历史失败: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE targets SET status = 'unknown', failure_count = 0,
+		last_error = '', last_checked_at = NULL, updated_at = ? WHERE id = ?`, formatTime(updatedAt), id)
+	if err != nil {
+		return err
+	}
+	if err := requireAffected(result, "渠道不存在"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CountTargetsByStatus 汇总渠道状态数量。

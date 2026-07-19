@@ -31,6 +31,7 @@ type Service struct {
 	running             map[string]struct{}
 	now                 func() time.Time
 	onError             func(error)
+	onSnapshot          func(string)
 	wait                sync.WaitGroup
 }
 
@@ -41,6 +42,7 @@ func NewService(database *store.Store, vault *secure.Vault, runner monitor.Runne
 		allowPrivateTargets: allowPrivateTargets, checkTimeout: 20 * time.Second, tickInterval: 15 * time.Second,
 		semaphore: make(chan struct{}, 4), running: make(map[string]struct{}),
 		now: func() time.Time { return time.Now().UTC() }, onError: func(error) {},
+		onSnapshot: func(string) {},
 	}
 }
 
@@ -48,6 +50,13 @@ func NewService(database *store.Store, vault *secure.Vault, runner monitor.Runne
 func (s *Service) SetErrorHandler(handler func(error)) {
 	if handler != nil {
 		s.onError = handler
+	}
+}
+
+// SetSnapshotHandler 设置检测结果保存后的实时刷新回调。
+func (s *Service) SetSnapshotHandler(handler func(string)) {
+	if handler != nil {
+		s.onSnapshot = handler
 	}
 }
 
@@ -60,6 +69,11 @@ func (s *Service) Start(ctx context.Context) {
 		defer ticker.Stop()
 		cleanupTicker := time.NewTicker(24 * time.Hour)
 		defer cleanupTicker.Stop()
+		notificationTicker := time.NewTicker(5 * time.Minute)
+		defer notificationTicker.Stop()
+		if err := s.alerts.RetryPending(ctx, 100); err != nil && ctx.Err() == nil {
+			s.onError(err)
+		}
 		if err := s.CheckDue(ctx); err != nil && ctx.Err() == nil {
 			s.onError(err)
 		}
@@ -72,6 +86,10 @@ func (s *Service) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				if err := s.CheckDue(ctx); err != nil && ctx.Err() == nil {
+					s.onError(err)
+				}
+			case <-notificationTicker.C:
+				if err := s.alerts.RetryPending(ctx, 100); err != nil && ctx.Err() == nil {
 					s.onError(err)
 				}
 			case <-cleanupTicker.C:
@@ -121,12 +139,27 @@ func (s *Service) CheckTarget(ctx context.Context, targetID string) error {
 	return s.runTarget(ctx, targetID)
 }
 
-// TestConfig 运行尚未保存的配置，不写入历史或触发告警。
-func (s *Service) TestConfig(ctx context.Context, target monitor.TargetConfig) (monitor.Snapshot, error) {
+// TestConfig 运行尚未保存的配置，不写入历史或触发告警，并临时返回自定义响应样本。
+func (s *Service) TestConfig(ctx context.Context, target monitor.TargetConfig) (monitor.Snapshot, any, error) {
 	target.AllowPrivateNetwork = s.allowPrivateTargets
 	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
 	defer cancel()
-	return s.runner.Run(timeoutContext, target)
+	if prober, ok := s.runner.(monitor.Prober); ok {
+		return prober.Probe(timeoutContext, target)
+	}
+	result, err := s.runner.Run(timeoutContext, target)
+	return result, nil, err
+}
+
+// DetectTarget 使用只读端点识别渠道类型。
+func (s *Service) DetectTarget(ctx context.Context, baseURL string) (monitor.TargetKind, error) {
+	detector, ok := s.runner.(monitor.Detector)
+	if !ok {
+		return "", errors.New("当前检测器不支持自动识别")
+	}
+	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
+	defer cancel()
+	return detector.Detect(timeoutContext, baseURL, s.allowPrivateTargets)
 }
 
 // Cleanup 根据设置清理历史和过期会话。
@@ -193,14 +226,35 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 	defer cancel()
 	snapshot, checkErr := s.runner.Run(timeoutContext, runtimeConfig)
 	if checkErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err := s.alerts.HandleFailure(ctx, target, checkErr); err != nil {
 			return errors.Join(checkErr, err)
 		}
+		s.onSnapshot(target.ID)
 		return checkErr
+	}
+	if snapshot.CredentialUpdate != nil {
+		updatedCredential := *snapshot.CredentialUpdate
+		updatedCredential.TOTPCode = ""
+		encoded, err := json.Marshal(updatedCredential)
+		if err != nil {
+			return errors.New("编码续期凭据失败")
+		}
+		encrypted, err := s.vault.Encrypt(encoded)
+		if err != nil {
+			return err
+		}
+		if err := s.store.UpdateTargetCredentials(ctx, target.ID, encrypted, s.now()); err != nil {
+			return err
+		}
+		snapshot.CredentialUpdate = nil
 	}
 	if err := s.alerts.HandleSuccess(ctx, target, snapshot); err != nil {
 		return err
 	}
+	s.onSnapshot(target.ID)
 	return nil
 }
 

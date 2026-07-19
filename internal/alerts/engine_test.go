@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,18 @@ import (
 
 type recordingNotifier struct {
 	items []Notification
+}
+
+type flakyNotifier struct {
+	attempts int
+}
+
+func (notifier *flakyNotifier) Notify(_ context.Context, _ Notification) error {
+	notifier.attempts++
+	if notifier.attempts == 1 {
+		return errors.New("临时推送失败")
+	}
+	return nil
 }
 
 func (notifier *recordingNotifier) Notify(_ context.Context, notification Notification) error {
@@ -134,6 +147,99 @@ func TestChatPoolOnlyComparesImageQuota(t *testing.T) {
 	accounts, err := database.ListChatAccounts(context.Background(), target.ID)
 	if err != nil || len(accounts) != 1 || accounts[0].Email == "private@example.com" {
 		t.Fatalf("账号明细未正确脱敏: %#v, %v", accounts, err)
+	}
+}
+
+func TestChatPoolDropsNonEmailAccountToPreventSecretPersistence(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindChatGPT2API))
+	defer database.Close()
+	engine := NewEngine(database, nil)
+	secret := "Bearer private-token-value"
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindChatGPT2API, Status: monitor.TargetStatusHealthy,
+		ObservedAt: time.Now().UTC(), Accounts: []monitor.AccountStatus{{
+			Email: secret, Type: "unknown", Status: "active", Quota: decimal.NewFromInt(1),
+		}},
+	}); err != nil {
+		t.Fatalf("处理异常账号明细失败: %v", err)
+	}
+	accounts, err := database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("读取账号明细失败: %v", err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("非邮箱账号不应写入明细：%#v", accounts)
+	}
+}
+
+func TestMaskEmailRejectsNonStandardAddress(t *testing.T) {
+	if actual := maskEmail("private-token@internal"); actual != "" {
+		t.Fatalf("非标准邮箱不应产生脱敏值：%q", actual)
+	}
+	if actual := maskEmail("private@example.com"); actual != "pr***@example.com" {
+		t.Fatalf("标准邮箱脱敏结果不正确：%q", actual)
+	}
+}
+
+func TestChatPoolRemovesSensitiveMetadata(t *testing.T) {
+	accounts := sanitizedAccounts("target_test", []monitor.AccountStatus{{
+		Email: "private@example.com", Type: "Bearer private-token", RestoreAt: "client_secret_value",
+	}}, time.Now().UTC())
+	if len(accounts) != 1 {
+		t.Fatalf("标准邮箱账号应保留：%#v", accounts)
+	}
+	if accounts[0].Type != "" || accounts[0].RestoreAt != "" {
+		t.Fatalf("疑似凭据的账号元数据不应被保存：%#v", accounts[0])
+	}
+}
+
+func TestDisabledRemoteAccountAlertsImmediately(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindSub2API))
+	defer database.Close()
+	notifier := &recordingNotifier{}
+	engine := NewEngine(database, notifier)
+	now := time.Now().UTC()
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindSub2API, Status: monitor.TargetStatusDisabled,
+		ObservedAt: now, Message: "账号已被停用",
+	}); err != nil {
+		t.Fatalf("处理停用账号失败: %v", err)
+	}
+	if len(notifier.items) != 1 || notifier.items[0].Type != string(monitor.AlertTypeCredentialInvalid) {
+		t.Fatalf("停用账号应立即通知: %#v", notifier.items)
+	}
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindSub2API, Status: monitor.TargetStatusHealthy, ObservedAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("处理账号恢复失败: %v", err)
+	}
+	if len(notifier.items) != 2 || !notifier.items[1].Recovered {
+		t.Fatalf("账号恢复通知不正确: %#v", notifier.items)
+	}
+}
+
+func TestFailedNotificationRemainsPendingUntilRetrySucceeds(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindNewAPI))
+	defer database.Close()
+	notifier := &flakyNotifier{}
+	engine := NewEngine(database, notifier)
+	threshold := decimal.NewFromInt(10)
+	snapshot := monitor.Snapshot{TargetID: target.ID, Kind: monitor.TargetKindNewAPI, ObservedAt: time.Now().UTC(), Metrics: []monitor.Metric{{
+		Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(1), Unit: "元", Threshold: &threshold,
+	}}}
+	if err := engine.HandleSuccess(context.Background(), target, snapshot); err != nil {
+		t.Fatalf("创建告警失败: %v", err)
+	}
+	active, err := database.ActiveAlert(context.Background(), target.ID, string(monitor.AlertTypeQuotaLow), string(monitor.MetricWalletBalance))
+	if err != nil || active.LastNotifiedAt != nil {
+		t.Fatalf("失败通知应保持待发送: %#v, %v", active, err)
+	}
+	if err := engine.RetryPending(context.Background(), 10); err != nil {
+		t.Fatalf("重试待发送通知失败: %v", err)
+	}
+	active, err = database.ActiveAlert(context.Background(), target.ID, string(monitor.AlertTypeQuotaLow), string(monitor.MetricWalletBalance))
+	if err != nil || active.LastNotifiedAt == nil || notifier.attempts != 2 {
+		t.Fatalf("通知重试状态不正确: %#v, 尝试=%d, 错误=%v", active, notifier.attempts, err)
 	}
 }
 

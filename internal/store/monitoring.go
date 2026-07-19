@@ -32,7 +32,7 @@ func (s *Store) ListSnapshots(ctx context.Context, targetID string, since time.T
 		limit = 2000
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, observed_at, status, metrics_json, detail_json
-		FROM snapshots WHERE target_id = ? AND observed_at >= ? ORDER BY observed_at ASC LIMIT ?`,
+		FROM snapshots WHERE target_id = ? AND observed_at >= ? ORDER BY observed_at DESC LIMIT ?`,
 		targetID, formatTime(since), limit)
 	if err != nil {
 		return nil, fmt.Errorf("读取检测历史失败: %w", err)
@@ -46,7 +46,13 @@ func (s *Store) ListSnapshots(ctx context.Context, targetID string, since time.T
 		}
 		snapshots = append(snapshots, snapshot)
 	}
-	return snapshots, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(snapshots)-1; left < right; left, right = left+1, right-1 {
+		snapshots[left], snapshots[right] = snapshots[right], snapshots[left]
+	}
+	return snapshots, nil
 }
 
 // CleanupHistory 清除保留期限之前的快照、已恢复告警和审计记录。
@@ -213,6 +219,30 @@ func (s *Store) CountActiveAlerts(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM alerts WHERE state IN ('open', 'acknowledged')`).Scan(&count)
 	return count, err
+}
+
+// ListUnnotifiedAlerts 返回尚未成功交给通知器的事件。
+func (s *Store) ListUnnotifiedAlerts(ctx context.Context, limit int) ([]AlertWithTarget, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.target_id, a.type, a.metric_key, a.state, a.title, a.message,
+		a.current_value, a.threshold_value, a.unit, a.opened_at, a.recovered_at, a.last_notified_at, t.name
+		FROM alerts a JOIN targets t ON t.id = a.target_id
+		WHERE a.last_notified_at IS NULL ORDER BY a.opened_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AlertWithTarget, 0)
+	for rows.Next() {
+		item, err := scanAlertWithTarget(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // AddAuditEvent 保存不含敏感值的操作记录。

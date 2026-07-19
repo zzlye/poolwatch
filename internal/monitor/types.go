@@ -31,11 +31,14 @@ const (
 	MetricLimitedAccounts     MetricKey = "limited_accounts"
 	MetricErrorAccounts       MetricKey = "error_accounts"
 	MetricDisabledAccounts    MetricKey = "disabled_accounts"
-	MetricCustomValue         MetricKey = "custom_value"
-	MetricAccountActive       MetricKey = MetricHealthyAccounts
-	MetricAccountLimited      MetricKey = MetricLimitedAccounts
-	MetricAccountAbnormal     MetricKey = MetricErrorAccounts
-	MetricAccountDisabled     MetricKey = MetricDisabledAccounts
+	// 账号累计统计来自 chatgpt2api 的只读健康端点。
+	MetricAccountSuccess  MetricKey = "account_success"
+	MetricAccountFail     MetricKey = "account_fail"
+	MetricCustomValue     MetricKey = "custom_value"
+	MetricAccountActive   MetricKey = MetricHealthyAccounts
+	MetricAccountLimited  MetricKey = MetricLimitedAccounts
+	MetricAccountAbnormal MetricKey = MetricErrorAccounts
+	MetricAccountDisabled MetricKey = MetricDisabledAccounts
 )
 
 // TargetStatus 表示一次检测得到的渠道状态。
@@ -154,13 +157,14 @@ type AccountStatus struct {
 
 // Snapshot 表示一次只读检测结果，不包含任何凭据或原始响应。
 type Snapshot struct {
-	TargetID   string          `json:"target_id"`
-	Kind       TargetKind      `json:"kind"`
-	Status     TargetStatus    `json:"status"`
-	ObservedAt time.Time       `json:"observed_at"`
-	Metrics    []Metric        `json:"metrics"`
-	Accounts   []AccountStatus `json:"accounts,omitempty"`
-	Message    string          `json:"message,omitempty"`
+	TargetID         string          `json:"target_id"`
+	Kind             TargetKind      `json:"kind"`
+	Status           TargetStatus    `json:"status"`
+	ObservedAt       time.Time       `json:"observed_at"`
+	Metrics          []Metric        `json:"metrics"`
+	Accounts         []AccountStatus `json:"accounts,omitempty"`
+	Message          string          `json:"message,omitempty"`
+	CredentialUpdate *Credential     `json:"-"`
 }
 
 // Adapter 定义所有渠道适配器统一的只读检测接口。
@@ -178,6 +182,16 @@ type Result = Snapshot
 // Runner 是主线调度器使用的最小检测接口。
 type Runner interface {
 	Run(ctx context.Context, target TargetInput) (Result, error)
+}
+
+// Prober 是连接测试接口使用的临时响应探测契约。
+type Prober interface {
+	Probe(ctx context.Context, target TargetInput) (Result, any, error)
+}
+
+// Detector 根据只读公开端点识别渠道类型。
+type Detector interface {
+	Detect(ctx context.Context, baseURL string, allowPrivate bool) (TargetKind, error)
 }
 
 func metricWithThreshold(target TargetConfig, key MetricKey, label string, value decimal.Decimal, unit string) Metric {

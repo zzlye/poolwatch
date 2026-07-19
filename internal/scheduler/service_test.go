@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,13 +23,27 @@ type blockingRunner struct {
 	once    sync.Once
 }
 
+type cancelRunner struct {
+	started chan struct{}
+}
+
+func (runner cancelRunner) Run(ctx context.Context, _ monitor.TargetInput) (monitor.Result, error) {
+	close(runner.started)
+	<-ctx.Done()
+	return monitor.Result{}, ctx.Err()
+}
+
 func (runner *blockingRunner) Run(ctx context.Context, target monitor.TargetInput) (monitor.Result, error) {
 	runner.once.Do(func() { runner.started <- target })
 	select {
 	case <-runner.release:
+		updatedCredential := target.Credential
+		updatedCredential.AccessToken = "renewed-access-token"
+		updatedCredential.RefreshToken = "rotated-refresh-token"
 		return monitor.Snapshot{
 			TargetID: target.ID, Kind: target.Kind, Status: monitor.TargetStatusHealthy, ObservedAt: time.Now().UTC(),
-			Metrics: []monitor.Metric{{Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(20), Unit: "元"}},
+			Metrics:          []monitor.Metric{{Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(20), Unit: "元"}},
+			CredentialUpdate: &updatedCredential,
 		}, nil
 	case <-ctx.Done():
 		return monitor.Snapshot{}, ctx.Err()
@@ -64,6 +79,10 @@ func TestSingleTargetCannotReenterAndCredentialsDecrypt(t *testing.T) {
 	if err != nil || stored.Status != string(monitor.TargetStatusHealthy) || stored.LastCheckedAt.IsZero() {
 		t.Fatalf("检测结果未保存: %#v, %v", stored, err)
 	}
+	decrypted, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(decrypted), "rotated-refresh-token") || strings.Contains(string(decrypted), "totp_code") {
+		t.Fatalf("续期凭据未安全保存: %s, %v", decrypted, err)
+	}
 }
 
 func TestHistoryCleanupUsesRetentionSetting(t *testing.T) {
@@ -89,6 +108,29 @@ func TestHistoryCleanupUsesRetentionSetting(t *testing.T) {
 	var count int
 	if err := database.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshots WHERE target_id = ?`, target.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("历史清理结果不正确: %d, %v", count, err)
+	}
+}
+
+func TestCallerCancellationDoesNotCountAsChannelFailure(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	runner := cancelRunner{started: make(chan struct{})}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.CheckTarget(ctx, target.ID) }()
+	<-runner.started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("调用方取消应原样返回: %v", err)
+	}
+	stored, err := database.TargetByID(context.Background(), target.ID)
+	if err != nil || stored.FailureCount != 0 || !stored.LastCheckedAt.IsZero() {
+		t.Fatalf("调用方取消不应污染渠道失败状态: %#v, %v", stored, err)
+	}
+	var snapshots int
+	if err := database.DB().QueryRow(`SELECT COUNT(*) FROM snapshots WHERE target_id = ?`, target.ID).Scan(&snapshots); err != nil || snapshots != 0 {
+		t.Fatalf("调用方取消不应保存失败快照: %d, %v", snapshots, err)
 	}
 }
 

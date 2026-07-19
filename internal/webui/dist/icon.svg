@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="号池监控图标">
+  <rect width="512" height="512" rx="96" fill="#147a55"/>
+  <path d="M256 92c67 44 123 49 123 49v101c0 88-52 146-123 178-71-32-123-90-123-178V141s56-5 123-49Z" fill="#f7fbf8"/>
+  <path d="M184 273h42l23-68 35 113 22-62h35" fill="none" stroke="#147a55" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

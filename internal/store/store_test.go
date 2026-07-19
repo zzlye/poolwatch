@@ -52,3 +52,35 @@ func TestStoreMigrationAndAuthenticationLifecycle(t *testing.T) {
 		t.Fatalf("数据库未启用 WAL: %q, %v", journalMode, err)
 	}
 }
+
+func TestSnapshotLimitKeepsNewestPointsInAscendingOrder(t *testing.T) {
+	database, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	target := Target{
+		ID: "target_history", Name: "历史测试", Kind: "custom", BaseURL: "https://example.com",
+		Enabled: true, PollIntervalSeconds: 300, ConfigJSON: "{}", Status: "unknown", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateTarget(ctx, target); err != nil {
+		t.Fatalf("创建渠道失败: %v", err)
+	}
+	for index := 0; index < 4; index++ {
+		if err := database.InsertSnapshot(ctx, &Snapshot{
+			TargetID: target.ID, ObservedAt: now.Add(time.Duration(index) * time.Second),
+			Status: "healthy", MetricsJSON: "[]", DetailJSON: "{}",
+		}); err != nil {
+			t.Fatalf("保存快照失败: %v", err)
+		}
+	}
+	items, err := database.ListSnapshots(ctx, target.ID, now.Add(-time.Minute), 2)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("读取受限历史失败: %#v, %v", items, err)
+	}
+	if !items[0].ObservedAt.Equal(now.Add(2*time.Second)) || !items[1].ObservedAt.Equal(now.Add(3*time.Second)) {
+		t.Fatalf("历史应保留最新数据并按时间升序返回: %#v", items)
+	}
+}

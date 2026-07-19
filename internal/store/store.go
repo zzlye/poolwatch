@@ -83,6 +83,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			value TEXT NOT NULL
 		)`,
 		`INSERT OR IGNORE INTO settings(key, value) VALUES ('history_retention_days', '7')`,
+		`INSERT OR IGNORE INTO settings(key, value) VALUES ('product_name', '号池监控')`,
+		`INSERT OR IGNORE INTO settings(key, value) VALUES ('default_poll_seconds', '300')`,
 		`CREATE TABLE IF NOT EXISTS targets (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -202,7 +204,7 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 }
 
 func formatTime(value time.Time) string {
-	return value.UTC().Format(time.RFC3339Nano)
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 }
 
 func parseTime(value string) time.Time {

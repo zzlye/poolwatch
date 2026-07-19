@@ -14,5 +14,3 @@ web/node_modules/
 web/dist/
 web/playwright-report/
 web/test-results/
-internal/webui/dist/
-

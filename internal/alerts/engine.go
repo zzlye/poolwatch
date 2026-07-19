@@ -107,10 +107,19 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 			return err
 		}
 	}
-	for _, alertType := range []string{string(monitor.AlertTypeCredentialInvalid), string(monitor.AlertTypeConnectivity)} {
-		if err := e.recoverIncident(ctx, target, alertType, "", "渠道检测已恢复", "渠道连接和凭据检测已经恢复正常。", observedAt); err != nil {
+	if status == monitor.TargetStatusDisabled {
+		message := strings.TrimSpace(snapshot.Message)
+		if message == "" {
+			message = "渠道账号当前处于停用或不可用状态。"
+		}
+		if err := e.openIncident(ctx, target, string(monitor.AlertTypeCredentialInvalid), "", "渠道账号已停用", message, "", "", "", "critical", observedAt); err != nil {
 			return err
 		}
+	} else if err := e.recoverIncident(ctx, target, string(monitor.AlertTypeCredentialInvalid), "", "渠道账号已恢复", "渠道账号和凭据检测已经恢复正常。", observedAt); err != nil {
+		return err
+	}
+	if err := e.recoverIncident(ctx, target, string(monitor.AlertTypeConnectivity), "", "渠道连接已恢复", "渠道连接检测已经恢复正常。", observedAt); err != nil {
+		return err
 	}
 	return e.store.UpdateTargetCheck(ctx, target.ID, string(status), 0, "", observedAt)
 }
@@ -158,6 +167,24 @@ func (e *Engine) HandleFailure(ctx context.Context, target store.Target, checkEr
 		_ = e.store.ResolveAlert(ctx, active.ID, now)
 	}
 	return e.openIncident(ctx, target, alertType, "", title, message, "", "", "", "critical", now)
+}
+
+// RetryPending 再次发送尚未成功交给通知器的事件。
+func (e *Engine) RetryPending(ctx context.Context, limit int) error {
+	items, err := e.store.ListUnnotifiedAlerts(ctx, limit)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		severity := "warning"
+		if item.Type == string(monitor.AlertTypeCredentialInvalid) || item.Type == string(monitor.AlertTypeConnectivity) {
+			severity = "critical"
+		} else if item.Type == string(monitor.AlertTypeRecovered) {
+			severity = "info"
+		}
+		e.notify(ctx, item.Alert, severity, item.Type == string(monitor.AlertTypeRecovered))
+	}
+	return nil
 }
 
 func (e *Engine) openThreshold(ctx context.Context, target store.Target, metric monitor.Metric, now time.Time) error {
@@ -219,10 +246,12 @@ func (e *Engine) recoverIncident(ctx context.Context, target store.Target, alert
 
 func (e *Engine) notify(ctx context.Context, alert store.Alert, severity string, recovered bool) {
 	if e.notifier != nil {
-		_ = e.notifier.Notify(ctx, Notification{
+		if err := e.notifier.Notify(ctx, Notification{
 			AlertID: alert.ID, TargetID: alert.TargetID, Type: alert.Type, Title: alert.Title,
 			Message: alert.Message, Severity: severity, Recovered: recovered,
-		})
+		}); err != nil {
+			return
+		}
 	}
 	_ = e.store.MarkAlertNotified(ctx, alert.ID, e.now())
 }
@@ -234,14 +263,16 @@ func shouldCompareThreshold(targetKind string, metricKey monitor.MetricKey) bool
 func sanitizedAccounts(targetID string, accounts []monitor.AccountStatus, observedAt time.Time) []store.ChatAccount {
 	result := make([]store.ChatAccount, 0, len(accounts))
 	for index, account := range accounts {
-		stableValue := strings.ToLower(strings.TrimSpace(account.Email)) + "|" + account.Type
-		if stableValue == "|" {
-			stableValue = fmt.Sprintf("row-%d", index)
-		}
+		stableValue := strings.ToLower(strings.TrimSpace(account.Email)) + "|" + account.Type + fmt.Sprintf("|%d", index)
 		externalID := identity.HashToken(stableValue)[:24]
+		maskedEmail := maskEmail(account.Email)
+		// 不接受非邮箱值，避免上游将令牌伪装在账号字段中写入数据库或接口响应。
+		if maskedEmail == "" {
+			continue
+		}
 		result = append(result, store.ChatAccount{
-			TargetID: targetID, ExternalID: externalID, Email: maskEmail(account.Email), Type: truncate(account.Type, 80),
-			Status: normalizeAccountStatus(account.Status), Quota: account.Quota.IntPart(), RestoreAt: truncate(account.RestoreAt, 100),
+			TargetID: targetID, ExternalID: externalID, Email: maskedEmail, Type: sanitizeAccountText(account.Type, 80),
+			Status: normalizeAccountStatus(account.Status), Quota: account.Quota.IntPart(), RestoreAt: sanitizeAccountText(account.RestoreAt, 100),
 			Success: account.Success, Fail: account.Fail, ObservedAt: observedAt,
 		})
 	}
@@ -251,8 +282,8 @@ func sanitizedAccounts(targetID string, accounts []monitor.AccountStatus, observ
 func maskEmail(email string) string {
 	email = strings.TrimSpace(email)
 	parts := strings.SplitN(email, "@", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return truncate(email, 120)
+	if len(parts) != 2 || !isDisplayEmail(parts[0], parts[1]) {
+		return ""
 	}
 	visible := []rune(parts[0])
 	prefix := string(visible[:1])
@@ -260,6 +291,42 @@ func maskEmail(email string) string {
 		prefix = string(visible[:2])
 	}
 	return prefix + "***@" + parts[1]
+}
+
+func isDisplayEmail(local, domain string) bool {
+	if len(local) == 0 || len(local) > 64 || len(domain) == 0 || len(domain) > 253 || !strings.Contains(domain, ".") {
+		return false
+	}
+	for _, character := range local {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune(".!#$%&'*+/=?^_`{|}~-", character)) {
+			return false
+		}
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') || character == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sanitizeAccountText(value string, maximum int) string {
+	value = truncate(value, maximum)
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(value))
+	for _, marker := range []string{"token", "secret", "password", "cookie", "authorization", "apikey", "bearer"} {
+		// 账号类型和恢复时间只是展示辅助信息，疑似凭据时宁可留空也不能持久化。
+		if strings.Contains(normalized, marker) {
+			return ""
+		}
+	}
+	return value
 }
 
 func normalizeAccountStatus(status string) string {

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -54,6 +56,11 @@ type SubscriptionInput struct {
 
 type sendFunc func(context.Context, []byte, *webpush.Subscription, *webpush.Options) (*http.Response, error)
 
+// resolver 允许测试替换域名解析，同时确保订阅校验和实际连接使用同一套解析边界。
+type resolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
 // Service 管理 VAPID 密钥、设备订阅和通知发送。
 type Service struct {
 	store      *store.Store
@@ -62,6 +69,7 @@ type Service struct {
 	publicKey  string
 	privateKey string
 	send       sendFunc
+	resolver   resolver
 	now        func() time.Time
 	mu         sync.RWMutex
 }
@@ -77,6 +85,7 @@ func NewService(database *store.Store, vault *secure.Vault, publicBaseURL string
 		vault:      vault,
 		subscriber: subscriber,
 		send:       webpush.SendNotificationWithContext,
+		resolver:   net.DefaultResolver,
 		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -129,8 +138,11 @@ func (s *Service) PublicKey() string {
 // Subscribe 加密订阅认证字段并保存设备。
 func (s *Service) Subscribe(ctx context.Context, input SubscriptionInput) error {
 	endpoint, err := url.Parse(strings.TrimSpace(input.Endpoint))
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
 		return errors.New("推送订阅地址无效")
+	}
+	if err := validatePushEndpoint(endpoint); err != nil {
+		return err
 	}
 	if len(input.Endpoint) > 4096 || len(input.P256DH) > 1024 || len(input.Auth) > 1024 {
 		return errors.New("推送订阅数据过长")
@@ -202,12 +214,13 @@ func (s *Service) Send(ctx context.Context, notification Notification) error {
 	var wait sync.WaitGroup
 	var errorMu sync.Mutex
 	errorsFound := make([]error, 0)
+	pushClient := newPushHTTPClient(s.resolver)
 	for _, saved := range subscriptions {
 		saved := saved
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			if err := s.sendOne(ctx, saved, payload, publicKey, privateKey); err != nil {
+			if err := s.sendOne(ctx, saved, payload, publicKey, privateKey, pushClient); err != nil {
 				errorMu.Lock()
 				errorsFound = append(errorsFound, err)
 				errorMu.Unlock()
@@ -222,11 +235,11 @@ func (s *Service) Send(ctx context.Context, notification Notification) error {
 func (s *Service) SendTest(ctx context.Context) error {
 	return s.Send(ctx, Notification{
 		Title: "号池监控测试", Body: "这台设备已经可以接收额度和账号状态通知。",
-		URL: "/settings/push", Tag: "push-test", Severity: "info",
+		URL: "/settings", Tag: "push-test", Severity: "info",
 	})
 }
 
-func (s *Service) sendOne(ctx context.Context, saved store.PushSubscription, payload []byte, publicKey, privateKey string) error {
+func (s *Service) sendOne(ctx context.Context, saved store.PushSubscription, payload []byte, publicKey, privateKey string, pushClient *http.Client) error {
 	p256dh, err := s.vault.Decrypt(saved.P256DH)
 	if err != nil {
 		return fmt.Errorf("读取推送设备密钥失败: %w", err)
@@ -239,7 +252,7 @@ func (s *Service) sendOne(ctx context.Context, saved store.PushSubscription, pay
 	subscription.Keys.P256dh = string(p256dh)
 	subscription.Keys.Auth = string(auth)
 	response, err := s.send(ctx, payload, subscription, &webpush.Options{
-		Subscriber: s.subscriber, VAPIDPublicKey: publicKey, VAPIDPrivateKey: privateKey, TTL: 60,
+		Subscriber: s.subscriber, VAPIDPublicKey: publicKey, VAPIDPrivateKey: privateKey, TTL: 60, HTTPClient: pushClient,
 	})
 	if err != nil {
 		return fmt.Errorf("发送浏览器通知失败: %w", err)
@@ -256,6 +269,93 @@ func (s *Service) sendOne(ctx context.Context, saved store.PushSubscription, pay
 		}
 	}
 	return s.store.TouchPushSubscription(ctx, saved.ID, s.now())
+}
+
+func validatePushEndpoint(endpoint *url.URL) error {
+	if endpoint == nil {
+		return errors.New("推送订阅地址无效")
+	}
+	host := strings.TrimSuffix(strings.ToLower(endpoint.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return errors.New("推送订阅地址必须使用公网服务")
+	}
+	if parsed := net.ParseIP(host); parsed != nil && !isPublicPushIP(parsed) {
+		return errors.New("推送订阅地址必须使用公网服务")
+	}
+	return nil
+}
+
+func newPushHTTPClient(lookup resolver) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// 推送端点不使用环境代理，连接前重新解析并直接拨号已校验的公网 IP，阻止 DNS 重绑定。
+	transport.Proxy = nil
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, errors.New("推送服务地址格式无效")
+		}
+		addresses, err := lookup.LookupIPAddr(ctx, host)
+		if err != nil || len(addresses) == 0 {
+			return nil, errors.New("推送服务地址解析失败")
+		}
+		for _, resolved := range addresses {
+			if !isPublicPushIP(resolved.IP) {
+				return nil, errors.New("推送服务地址不是公网地址")
+			}
+		}
+		var lastErr error
+		for _, resolved := range addresses {
+			connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+			if dialErr == nil {
+				return connection, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, errors.New("推送服务没有可连接的公网地址")
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("推送服务不允许重定向")
+		},
+	}
+}
+
+func isPublicPushIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() {
+		return false
+	}
+	for _, prefix := range blockedPushPrefixes() {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func blockedPushPrefixes() []netip.Prefix {
+	raw := []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+		"::/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001::/23", "2001:db8::/32",
+		"2002::/16", "fc00::/7", "fe80::/10", "fec0::/10",
+	}
+	prefixes := make([]netip.Prefix, 0, len(raw))
+	for _, value := range raw {
+		prefixes = append(prefixes, netip.MustParsePrefix(value))
+	}
+	return prefixes
 }
 
 func truncate(value string, maximum int) string {

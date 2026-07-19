@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,10 +45,19 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("创建数据目录失败: %w", err)
 	}
 
+	publicBaseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/")
+	if publicBaseURL != "" {
+		parsed, err := url.Parse(publicBaseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
+			(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return Config{}, errors.New("PUBLIC_BASE_URL 必须是不含路径、参数和账号信息的 HTTP 或 HTTPS 地址")
+		}
+	}
+
 	return Config{
 		Address:             valueOrDefault("LISTEN_ADDRESS", ":8080"),
 		DataDir:             dataDir,
-		PublicBaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
+		PublicBaseURL:       publicBaseURL,
 		SetupToken:          strings.TrimSpace(os.Getenv("SETUP_TOKEN")),
 		EncryptionKey:       key,
 		AllowPrivateTargets: boolValue("ALLOW_PRIVATE_TARGETS", false),

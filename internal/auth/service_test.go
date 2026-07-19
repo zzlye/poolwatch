@@ -58,6 +58,13 @@ func TestSetupLoginAndTOTPRecovery(t *testing.T) {
 	if err != nil || len(recoveryCodes) != 10 {
 		t.Fatalf("启用动态验证码失败: %v", err)
 	}
+	admin, _ = database.AdminByUsername(ctx, "admin")
+	if _, err := service.StartTOTP(ctx, admin); !errors.Is(err, ErrTOTPAlreadyEnabled) {
+		t.Fatalf("已启用时不应覆盖动态验证码: %v", err)
+	}
+	if _, err := service.ConfirmTOTP(ctx, code); !errors.Is(err, ErrTOTPAlreadyEnabled) {
+		t.Fatalf("已启用时不应重复确认动态验证码: %v", err)
+	}
 	if _, err := service.Login(ctx, "admin", "long-password-123", "000000"); !errors.Is(err, ErrSecondFactor) {
 		t.Fatalf("错误动态验证码未被拒绝: %v", err)
 	}

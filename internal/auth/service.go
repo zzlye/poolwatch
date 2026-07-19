@@ -27,6 +27,7 @@ var (
 	ErrAlreadyInitialized = errors.New("系统已经完成初始化")
 	ErrSetupToken         = errors.New("初始化口令不正确")
 	ErrSecondFactor       = errors.New("请输入有效的动态验证码或恢复码")
+	ErrTOTPAlreadyEnabled = errors.New("动态验证码已经启用，请先验证并关闭现有配置")
 )
 
 // Service 负责唯一管理员、登录会话和动态验证码生命周期。
@@ -142,6 +143,13 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 
 // StartTOTP 生成待确认的密钥和一次性恢复码。
 func (s *Service) StartTOTP(ctx context.Context, admin store.Admin) (TOTPSetup, error) {
+	current, err := s.store.AdminByID(ctx, admin.ID)
+	if err != nil {
+		return TOTPSetup{}, err
+	}
+	if current.TOTPEnabled {
+		return TOTPSetup{}, ErrTOTPAlreadyEnabled
+	}
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      "号池监控",
 		AccountName: admin.Username,
@@ -174,6 +182,13 @@ func (s *Service) StartTOTP(ctx context.Context, admin store.Admin) (TOTPSetup, 
 
 // ConfirmTOTP 验证首个动态验证码后正式启用第二因素。
 func (s *Service) ConfirmTOTP(ctx context.Context, code string) ([]string, error) {
+	admin, err := s.store.AdminByID(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	if admin.TOTPEnabled {
+		return nil, ErrTOTPAlreadyEnabled
+	}
 	pending, err := s.loadPendingTOTP(ctx)
 	if err != nil {
 		return nil, err
@@ -298,7 +313,7 @@ func generateRecoveryCodes(count int) ([]string, error) {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	codes := make([]string, 0, count)
 	for len(codes) < count {
-		random := make([]byte, 8)
+		random := make([]byte, 12)
 		if _, err := rand.Read(random); err != nil {
 			return nil, err
 		}
@@ -306,7 +321,7 @@ func generateRecoveryCodes(count int) ([]string, error) {
 		for index := range random {
 			encoded[index] = alphabet[int(random[index])%len(alphabet)]
 		}
-		code := string(encoded[:4]) + "-" + string(encoded[4:8])
+		code := string(encoded[:4]) + "-" + string(encoded[4:8]) + "-" + string(encoded[8:12])
 		codes = append(codes, code)
 	}
 	return codes, nil
@@ -319,7 +334,7 @@ func recoveryCodeHash(code string) string {
 
 func looksLikeRecoveryCode(code string) bool {
 	normalized := strings.ReplaceAll(strings.TrimSpace(code), "-", "")
-	return len(normalized) == 8
+	return len(normalized) == 12
 }
 
 func constantTimeEqual(first, second string) bool {

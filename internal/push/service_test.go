@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ func TestPushKeysSubscriptionAndExpiredEndpoint(t *testing.T) {
 	}
 	ctx := context.Background()
 	service := NewService(database, vault, "https://monitor.example.com")
+	service.resolver = staticResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
 	if err := service.EnsureKeys(ctx); err != nil || service.PublicKey() == "" {
 		t.Fatalf("初始化推送密钥失败: %v", err)
 	}
@@ -45,9 +47,12 @@ func TestPushKeysSubscriptionAndExpiredEndpoint(t *testing.T) {
 	}
 
 	// 使用精确函数签名替换发送器，验证成功发送会更新设备。
-	service.send = func(_ context.Context, payload []byte, _ *webpush.Subscription, _ *webpush.Options) (*http.Response, error) {
+	service.send = func(_ context.Context, payload []byte, _ *webpush.Subscription, options *webpush.Options) (*http.Response, error) {
 		if !strings.Contains(string(payload), "余额不足") {
 			t.Fatalf("通知载荷不正确: %s", payload)
+		}
+		if options.HTTPClient == nil {
+			t.Fatal("推送请求未使用受限公网客户端")
 		}
 		return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}
@@ -70,4 +75,32 @@ func TestPushKeysSubscriptionAndExpiredEndpoint(t *testing.T) {
 	if err := reloaded.EnsureKeys(ctx); err != nil || reloaded.PublicKey() != publicKey {
 		t.Fatalf("重启后推送密钥未保持: %v", err)
 	}
+}
+
+func TestPushSubscription拒绝非公网地址(t *testing.T) {
+	database, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("创建保险箱失败: %v", err)
+	}
+	service := NewService(database, vault, "https://monitor.example.com")
+	err = service.Subscribe(context.Background(), SubscriptionInput{
+		Endpoint: "https://127.0.0.1/subscription/one", P256DH: "browser-public-key", Auth: "browser-auth-secret",
+	})
+	if err == nil || !strings.Contains(err.Error(), "公网") {
+		t.Fatalf("非公网推送地址未被拒绝: %v", err)
+	}
+}
+
+type staticResolver struct {
+	addresses []net.IPAddr
+	err       error
+}
+
+func (resolver staticResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return resolver.addresses, resolver.err
 }
