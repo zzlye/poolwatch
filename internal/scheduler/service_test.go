@@ -1,0 +1,126 @@
+package scheduler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/shopspring/decimal"
+
+	"poolwatch/internal/alerts"
+	"poolwatch/internal/monitor"
+	"poolwatch/internal/secure"
+	"poolwatch/internal/store"
+)
+
+type blockingRunner struct {
+	started chan monitor.TargetConfig
+	release chan struct{}
+	once    sync.Once
+}
+
+func (runner *blockingRunner) Run(ctx context.Context, target monitor.TargetInput) (monitor.Result, error) {
+	runner.once.Do(func() { runner.started <- target })
+	select {
+	case <-runner.release:
+		return monitor.Snapshot{
+			TargetID: target.ID, Kind: target.Kind, Status: monitor.TargetStatusHealthy, ObservedAt: time.Now().UTC(),
+			Metrics: []monitor.Metric{{Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(20), Unit: "元"}},
+		}, nil
+	case <-ctx.Done():
+		return monitor.Snapshot{}, ctx.Err()
+	}
+}
+
+func TestSingleTargetCannotReenterAndCredentialsDecrypt(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	runner := &blockingRunner{started: make(chan monitor.TargetConfig, 1), release: make(chan struct{})}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { done <- service.CheckTarget(ctx, target.ID) }()
+
+	var received monitor.TargetConfig
+	select {
+	case received = <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("检测器未启动")
+	}
+	if received.Credential.AccessToken != "secret-token" || received.AllowPrivateNetwork {
+		t.Fatalf("运行配置解密或网络策略不正确: %#v", received)
+	}
+	if err := service.CheckTarget(ctx, target.ID); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("渠道重入未被阻止: %v", err)
+	}
+	close(runner.release)
+	if err := <-done; err != nil {
+		t.Fatalf("首次检测失败: %v", err)
+	}
+	stored, err := database.TargetByID(ctx, target.ID)
+	if err != nil || stored.Status != string(monitor.TargetStatusHealthy) || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("检测结果未保存: %#v, %v", stored, err)
+	}
+}
+
+func TestHistoryCleanupUsesRetentionSetting(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	service := NewService(database, vault, &blockingRunner{}, alerts.NewEngine(database, nil), false)
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	ctx := context.Background()
+	if err := database.SetSetting(ctx, "history_retention_days", "1"); err != nil {
+		t.Fatalf("保存保留期限失败: %v", err)
+	}
+	for _, observedAt := range []time.Time{now.Add(-48 * time.Hour), now.Add(-12 * time.Hour)} {
+		if err := database.InsertSnapshot(ctx, &store.Snapshot{
+			TargetID: target.ID, ObservedAt: observedAt, Status: "healthy", MetricsJSON: "[]", DetailJSON: "{}",
+		}); err != nil {
+			t.Fatalf("保存测试快照失败: %v", err)
+		}
+	}
+	if err := service.Cleanup(ctx); err != nil {
+		t.Fatalf("清理历史失败: %v", err)
+	}
+	var count int
+	if err := database.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM snapshots WHERE target_id = ?`, target.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("历史清理结果不正确: %d, %v", count, err)
+	}
+}
+
+func schedulerFixture(t *testing.T) (*store.Store, *secure.Vault, store.Target) {
+	t.Helper()
+	database, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		database.Close()
+		t.Fatalf("创建保险箱失败: %v", err)
+	}
+	credentialJSON, _ := json.Marshal(monitor.Credential{AccessToken: "secret-token", UserID: "1"})
+	credentialEncrypted, err := vault.Encrypt(credentialJSON)
+	if err != nil {
+		database.Close()
+		t.Fatalf("加密凭据失败: %v", err)
+	}
+	configJSON, _ := json.Marshal(monitor.TargetConfig{Thresholds: map[monitor.MetricKey]decimal.Decimal{
+		monitor.MetricWalletBalance: decimal.NewFromInt(10),
+	}})
+	now := time.Now().UTC()
+	target := store.Target{
+		ID: "target_scheduler", Name: "调度测试", Kind: string(monitor.TargetKindNewAPI), BaseURL: "https://example.com",
+		Enabled: true, PollIntervalSeconds: 300, ConfigJSON: string(configJSON), CredentialsEnc: credentialEncrypted,
+		Status: string(monitor.TargetStatusUnknown), CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateTarget(context.Background(), target); err != nil {
+		database.Close()
+		t.Fatalf("创建测试渠道失败: %v", err)
+	}
+	return database, vault, target
+}

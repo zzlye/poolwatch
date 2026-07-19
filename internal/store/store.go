@@ -21,7 +21,8 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("创建数据库目录失败: %w", err)
 	}
 	databasePath := filepath.Join(dataDir, "poolwatch.db")
-	db, err := sql.Open("sqlite", databasePath)
+	dsn := databasePath + "?_pragma=journal_mode%28WAL%29&_pragma=foreign_keys%281%29&_pragma=busy_timeout%285000%29"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
@@ -124,13 +125,15 @@ func (s *Store) migrate(ctx context.Context) error {
 			last_notified_at TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_alerts_state_time ON alerts(state, opened_at DESC)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_incident ON alerts(target_id, type, metric_key) WHERE state = 'open'`,
+		`DROP INDEX IF EXISTS idx_alerts_open_incident`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_incident ON alerts(target_id, type, metric_key) WHERE state IN ('open', 'acknowledged')`,
 		`CREATE TABLE IF NOT EXISTS push_subscriptions (
 			id TEXT PRIMARY KEY,
 			endpoint TEXT NOT NULL UNIQUE,
 			p256dh TEXT NOT NULL,
 			auth TEXT NOT NULL,
 			device_name TEXT NOT NULL,
+			user_agent TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			last_used_at TEXT NOT NULL
 		)`,
@@ -159,6 +162,41 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("执行数据库迁移失败: %w", err)
 		}
+	}
+	if err := s.ensureColumn(ctx, "push_subscriptions", "user_agent", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureColumn 为早期数据库补充后来新增的简单字段。
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, fieldType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition); err != nil {
+		return fmt.Errorf("升级数据库字段失败: %w", err)
 	}
 	return nil
 }

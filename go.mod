@@ -3,12 +3,17 @@ module poolwatch
 go 1.26.0
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/pquerna/otp v1.5.0
+	github.com/shopspring/decimal v1.4.0
 	golang.org/x/crypto v0.47.0
 	modernc.org/sqlite v1.54.0
 )
 
 require (
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

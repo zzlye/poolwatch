@@ -72,10 +72,11 @@ type Alert struct {
 // PushSubscription 保存浏览器推送订阅所需的公开信息。
 type PushSubscription struct {
 	ID         string    `json:"id"`
-	Endpoint   string    `json:"endpoint"`
-	P256DH     string    `json:"p256dh"`
-	Auth       string    `json:"auth"`
+	Endpoint   string    `json:"-"`
+	P256DH     string    `json:"-"`
+	Auth       string    `json:"-"`
 	DeviceName string    `json:"device_name"`
+	UserAgent  string    `json:"user_agent"`
 	CreatedAt  time.Time `json:"created_at"`
 	LastUsedAt time.Time `json:"last_used_at"`
 }
@@ -92,4 +93,10 @@ type ChatAccount struct {
 	Success    int64     `json:"success"`
 	Fail       int64     `json:"fail"`
 	ObservedAt time.Time `json:"observed_at"`
+}
+
+// AlertWithTarget 为告警列表附加渠道显示名称。
+type AlertWithTarget struct {
+	Alert
+	TargetName string `json:"target_name"`
 }

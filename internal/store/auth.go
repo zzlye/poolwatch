@@ -132,6 +132,27 @@ func (s *Store) DeleteAdminSessions(ctx context.Context, adminID int64) error {
 	return err
 }
 
+// UpdateAdminPassword 替换密码并注销管理员的全部已有会话。
+func (s *Store) UpdateAdminPassword(ctx context.Context, adminID int64, passwordHash string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash = ?, password_set_at = ? WHERE id = ?`,
+		passwordHash, formatTime(now), adminID)
+	if err != nil {
+		return err
+	}
+	if err := requireAffected(result, "管理员不存在"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id = ?`, adminID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // CleanupSessions 清除所有过期会话。
 func (s *Store) CleanupSessions(ctx context.Context, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, formatTime(now))
