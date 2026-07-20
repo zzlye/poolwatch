@@ -14,3 +14,12 @@ web/node_modules/
 web/dist/
 web/playwright-report/
 web/test-results/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/build/
+android/app/keystore.properties
+android/**/*.jks
+android/**/*.keystore
+android/**/*.apk
+android/**/*.aab

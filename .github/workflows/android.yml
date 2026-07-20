@@ -1,0 +1,152 @@
+name: 构建安卓应用
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "android-v*"
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 测试并构建调试安装包
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: 配置 Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/app/*.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: 设置 Gradle 执行权限
+        run: chmod +x gradlew
+
+      - name: 运行单元测试
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: 运行代码检查
+        run: ./gradlew --no-daemon lintDebug
+
+      - name: 构建调试安装包
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: 上传调试安装包
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 号池监控-debug-${{ github.sha }}
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: 构建并发布签名安装包
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: 配置 Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            android/*.gradle.kts
+            android/app/*.gradle.kts
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: 设置 Gradle 执行权限
+        run: chmod +x gradlew
+
+      - name: 生成签名文件与配置
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "缺少 GitHub Secret：${name}" >&2
+              exit 1
+            fi
+          done
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+          {
+            printf 'storeFile=%s\n' 'release.keystore'
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > app/keystore.properties
+
+      - name: 构建签名安装包
+        env:
+          POOLWATCH_KEYSTORE_PATH: ${{ github.workspace }}/android/app/release.keystore
+          POOLWATCH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          POOLWATCH_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          POOLWATCH_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon clean assembleRelease
+
+      - name: 整理安装包并生成校验值
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          apk_path="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          if [ -z "$apk_path" ]; then
+            echo "未找到发布安装包" >&2
+            exit 1
+          fi
+          output_name="poolwatch-${GITHUB_REF_NAME}.apk"
+          cp "$apk_path" "dist/$output_name"
+          cd dist
+          sha256sum "$output_name" > "$output_name.sha256"
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          name: 号池监控 ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            android/dist/*.apk
+            android/dist/*.sha256

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">号池监控</string>
+    <string name="monitoring_channel_name">持续监控</string>
+    <string name="monitoring_channel_description">显示号池实时监控的运行状态</string>
+    <string name="alert_channel_name">号池告警</string>
+    <string name="alert_channel_description">余额、额度、凭据和渠道状态提醒</string>
+    <string name="monitoring_special_use_description">持续接收用户已开启的号池状态事件，用于发送额度和异常提醒。</string>
+</resources>
