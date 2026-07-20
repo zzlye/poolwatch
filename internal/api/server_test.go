@@ -459,6 +459,27 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 	}
 }
 
+func TestCLIProxyAPIAccountResponseOmitsImageQuota(t *testing.T) {
+	account := store.ChatAccount{
+		ExternalID: "hashed-account", Provider: "codex", Type: "oauth", Status: string(monitor.TargetStatusHealthy), Quota: 77,
+	}
+	cliPayload, err := json.Marshal(mapAccountResponse(string(monitor.TargetKindCLIProxyAPI), account))
+	if err != nil {
+		t.Fatalf("序列化 CLIProxyAPI 账号响应失败: %v", err)
+	}
+	if strings.Contains(string(cliPayload), "imageQuota") {
+		t.Fatalf("CLIProxyAPI 账号响应不应包含图片额度：%s", cliPayload)
+	}
+
+	chatPayload, err := json.Marshal(mapAccountResponse(string(monitor.TargetKindChatGPT2API), account))
+	if err != nil {
+		t.Fatalf("序列化 chatgpt2api 账号响应失败: %v", err)
+	}
+	if !strings.Contains(string(chatPayload), `"imageQuota":"77"`) {
+		t.Fatalf("chatgpt2api 账号响应应继续包含图片额度：%s", chatPayload)
+	}
+}
+
 func TestSensitiveSampleKeyCoversCompositeAndCamelCase(t *testing.T) {
 	for _, key := range []string{
 		"client_secret", "refreshToken", "authorizationHeader", "x-api-key", "privateKeyPem",

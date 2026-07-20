@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Check, ExternalLink, Eye, EyeOff, FlaskConical, Globe, KeyRound, LoaderCircle, Lock, Search, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, Download, ExternalLink, Eye, EyeOff, FlaskConical, Globe, KeyRound, LoaderCircle, Lock, Search, X } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
@@ -8,6 +8,18 @@ import type { CredentialMode, Target, TargetAuthAttempt, TargetDraft, TargetKind
 import { metricLabels, targetKindLabels } from '../types'
 
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
+// 浏览器助手压缩包随页面一起发布，桌面端安装后即可读取当前填写站点的会话。
+const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.0.0.zip'
+
+interface BrowserHelperResult {
+  source: 'poolwatch-extension'
+  type: 'POOLWATCH_IMPORT_RESULT'
+  requestId: string
+  attemptId?: string
+  ok: boolean
+  code?: string
+  message?: string
+}
 
 const newAPISubscriptionThreshold: ThresholdDraft = {
   key: 'subscription_balance',
@@ -196,6 +208,14 @@ function BrowserAuthorizationFields({
   const [callbackUrl, setCallbackUrl] = useState('')
   const [callbackError, setCallbackError] = useState('')
   const [callbackImported, setCallbackImported] = useState(false)
+  const [browserHelperReady, setBrowserHelperReady] = useState(false)
+  const [browserHelperMessage, setBrowserHelperMessage] = useState('')
+  const [browserHelperImporting, setBrowserHelperImporting] = useState(false)
+  const [showBrowserHelperInstall, setShowBrowserHelperInstall] = useState(false)
+  const helperRequestId = useRef('')
+  const helperAttemptId = useRef('')
+  const helperAfterCreate = useRef(false)
+  const helperTimeout = useRef(0)
 
   const applyAttempt = (next: TargetAuthAttempt) => {
     setAttempt(next)
@@ -207,9 +227,43 @@ function BrowserAuthorizationFields({
     }
   }
 
+  const requestBrowserHelper = (next: TargetAuthAttempt) => {
+    // 页面只把当前授权任务编号交给助手，渠道地址由助手向服务器读取，避免传入批量渠道数据。
+    const requestId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    helperRequestId.current = requestId
+    helperAttemptId.current = next.id
+    setBrowserHelperImporting(true)
+    setBrowserHelperMessage('正在读取已登录站点，请保持当前页面打开。')
+    window.clearTimeout(helperTimeout.current)
+    helperTimeout.current = window.setTimeout(() => {
+      if (helperRequestId.current !== requestId) return
+      helperRequestId.current = ''
+      helperAttemptId.current = ''
+      setBrowserHelperImporting(false)
+      setBrowserHelperMessage('浏览器助手响应超时，请刷新页面后重试。')
+    }, 30000)
+    window.postMessage({
+      source: 'poolwatch-page',
+      type: 'POOLWATCH_IMPORT_NEW_API',
+      requestId,
+      attemptId: next.id
+    }, window.location.origin)
+  }
+
   const createMutation = useMutation({
     mutationFn: () => api.createTargetAuthAttempt({ kind: draft.kind, baseUrl: draft.baseUrl }),
-    onSuccess: applyAttempt
+    onSuccess: (next) => {
+      applyAttempt(next)
+      if (helperAfterCreate.current) {
+        helperAfterCreate.current = false
+        requestBrowserHelper(next)
+      }
+    },
+    onError: () => {
+      helperAfterCreate.current = false
+    }
   })
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelTargetAuthAttempt(attempt!.id),
@@ -241,6 +295,42 @@ function BrowserAuthorizationFields({
     }
   }, [attempt?.id, attempt?.status])
 
+  useEffect(() => {
+    if (isAndroidApp || draft.kind !== 'new_api') return
+    const announce = () => window.postMessage({ source: 'poolwatch-page', type: 'POOLWATCH_BROWSER_HELPER_PING' }, window.location.origin)
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== window || event.origin !== window.location.origin) return
+      const message = event.data
+      if (message?.source !== 'poolwatch-extension') return
+      if (message.type === 'POOLWATCH_BROWSER_HELPER_READY') {
+        setBrowserHelperReady(true)
+        setShowBrowserHelperInstall(false)
+        return
+      }
+      if (message.type !== 'POOLWATCH_IMPORT_RESULT' || message.requestId !== helperRequestId.current) return
+      const result = message as BrowserHelperResult
+      if (result.ok && result.attemptId !== helperAttemptId.current) return
+      window.clearTimeout(helperTimeout.current)
+      helperRequestId.current = ''
+      helperAttemptId.current = ''
+      setBrowserHelperImporting(false)
+      setBrowserHelperMessage(result.message || (result.ok ? '已读取登录会话。' : '读取登录会话失败。'))
+      if (result.ok && result.attemptId) {
+        void api.targetAuthAttempt(result.attemptId).then(applyAttempt).catch((error) => {
+          setBrowserHelperMessage(error instanceof Error ? error.message : '读取网页登录状态失败。')
+        })
+      }
+    }
+    window.addEventListener('message', handleMessage)
+    announce()
+    const timer = window.setInterval(announce, 3000)
+    return () => {
+      window.removeEventListener('message', handleMessage)
+      window.clearInterval(timer)
+      window.clearTimeout(helperTimeout.current)
+    }
+  }, [draft.kind, isAndroidApp])
+
   const prepareLogin = () => {
     setPollError('')
     setCallbackError('')
@@ -256,6 +346,24 @@ function BrowserAuthorizationFields({
       return
     }
     window.open(attempt.loginUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const quickImport = () => {
+    setPollError('')
+    setCallbackError('')
+    if (!browserHelperReady) {
+      setShowBrowserHelperInstall(true)
+      setBrowserHelperMessage('安装浏览器助手并刷新本页后，即可一键读取已登录站点。')
+      return
+    }
+    setShowBrowserHelperInstall(false)
+    update({ browserAuthAttemptId: '' })
+    if (attempt?.status === 'waiting') {
+      requestBrowserHelper(attempt)
+      return
+    }
+    helperAfterCreate.current = true
+    createMutation.mutate()
   }
 
   const importSub2APICallback = () => {
@@ -288,28 +396,56 @@ function BrowserAuthorizationFields({
         <div><strong>渠道网页登录</strong><small>登录页面由渠道站点提供，号池监控不会接触第三方账号密码。</small></div>
         {attempt?.status === 'ready' || (configured && !attempt) ? <span className="configured-badge"><Check aria-hidden="true" size={15} />已配置</span> : null}
       </div>
-      <div className="browser-auth-actions">
-        <button className="button secondary" type="button" disabled={createMutation.isPending || attempt?.status === 'waiting'} onClick={prepareLogin}>
-          {createMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Globe aria-hidden="true" size={18} />}
-          {createMutation.isPending ? '正在准备' : attempt ? '重新准备网页登录' : '准备网页登录'}
-        </button>
-        {attempt?.status === 'waiting' ? <button className="button primary" type="button" onClick={openLoginWindow}><ExternalLink aria-hidden="true" size={18} />打开授权窗口</button> : null}
-        {attempt?.status === 'waiting' ? <button className="button ghost" type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate()}><X aria-hidden="true" size={18} />取消</button> : null}
-      </div>
+      {!isAndroidApp && draft.kind === 'new_api' ? (
+        <div className="browser-helper-card">
+          <div className="browser-helper-title">
+            <div><strong>读取当前填写地址</strong><small>只读取第一步填写的渠道地址，从当前浏览器中取得该站点的会话和用户 ID。</small></div>
+            <span className={browserHelperReady ? 'configured-badge' : 'helper-status-badge'}>{browserHelperReady ? <><Check aria-hidden="true" size={15} />已连接</> : '待安装'}</span>
+          </div>
+          <div className="browser-auth-actions">
+            <button className="button primary" type="button" disabled={createMutation.isPending || browserHelperImporting} onClick={quickImport}>
+              {createMutation.isPending || browserHelperImporting ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Globe aria-hidden="true" size={18} />}
+              {createMutation.isPending ? '正在准备' : browserHelperImporting ? '正在读取' : browserHelperReady ? '一键读取当前地址' : '启用一键读取'}
+            </button>
+            <a className="button secondary" href={browserHelperDownloadURL} download><Download aria-hidden="true" size={18} />下载浏览器助手</a>
+            {attempt?.status === 'waiting' ? <button className="button ghost" type="button" onClick={openLoginWindow}><ExternalLink aria-hidden="true" size={18} />打开渠道站点</button> : null}
+          </div>
+          {showBrowserHelperInstall ? (
+            <ol className="browser-helper-steps">
+              <li>下载并解压浏览器助手。</li>
+              <li>在 Chrome 或 Edge 扩展页面开启开发者模式，选择“加载已解压的扩展程序”。</li>
+              <li>刷新当前页面，再点击“一键读取当前地址”。</li>
+            </ol>
+          ) : null}
+          {browserHelperMessage ? <InlineMessage tone={browserHelperMessage.includes('已读取') ? 'success' : 'info'}>{browserHelperMessage}</InlineMessage> : null}
+        </div>
+      ) : (
+        <div className="browser-auth-actions">
+          <button className="button secondary" type="button" disabled={createMutation.isPending || attempt?.status === 'waiting'} onClick={prepareLogin}>
+            {createMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Globe aria-hidden="true" size={18} />}
+            {createMutation.isPending ? '正在准备' : attempt ? '重新准备网页登录' : '准备网页登录'}
+          </button>
+          {attempt?.status === 'waiting' ? <button className="button primary" type="button" onClick={openLoginWindow}><ExternalLink aria-hidden="true" size={18} />打开授权窗口</button> : null}
+          {attempt?.status === 'waiting' ? <button className="button ghost" type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate()}><X aria-hidden="true" size={18} />取消</button> : null}
+        </div>
+      )}
       {statusMessage ? <InlineMessage tone={attempt?.status === 'ready' ? 'success' : attempt?.status === 'expired' || attempt?.status === 'cancelled' ? 'danger' : 'info'}>{statusMessage}</InlineMessage> : null}
       {createMutation.error ? <InlineMessage tone="danger">{createMutation.error.message}</InlineMessage> : null}
       {cancelMutation.error ? <InlineMessage tone="danger">{cancelMutation.error.message}</InlineMessage> : null}
       {pollError ? <InlineMessage tone="danger">网页登录状态更新失败：{pollError}</InlineMessage> : null}
 
       {!isAndroidApp && draft.kind === 'new_api' ? (
-        <div className="manual-auth-import">
-          <div><strong>桌面浏览器手工导入</strong><p>在渠道页面完成 Linux.do、GitHub 等登录后，填写该站点的 Cookie 和用户 ID。</p></div>
-          <div className="form-grid">
-            <SecretField label="登录 Cookie" value={draft.cookie} show={false} editing={editing} onChange={(cookie) => update({ cookie, browserAuthAttemptId: '' })} onToggle={() => undefined} hideToggle />
-            <label className="field"><span>用户 ID</span><input value={draft.userId} onChange={(event) => update({ userId: event.target.value, browserAuthAttemptId: '' })} inputMode="numeric" placeholder={editing ? '留空表示保持不变' : ''} /></label>
+        <details className="manual-auth-details">
+          <summary>手工填写 Cookie 和用户 ID</summary>
+          <div className="manual-auth-import">
+            <div><strong>备用导入方式</strong><p>需要手工处理时，再填写该站点的 Cookie 和用户 ID。</p></div>
+            <div className="form-grid">
+              <SecretField label="登录 Cookie" value={draft.cookie} show={false} editing={editing} onChange={(cookie) => update({ cookie, browserAuthAttemptId: '' })} onToggle={() => undefined} hideToggle />
+              <label className="field"><span>用户 ID</span><input value={draft.userId} onChange={(event) => update({ userId: event.target.value, browserAuthAttemptId: '' })} inputMode="numeric" placeholder={editing ? '留空表示保持不变' : ''} /></label>
+            </div>
+            {draft.cookie && draft.userId ? <InlineMessage tone="success">Cookie 和用户 ID 已填写，保存前可在最后一步测试连接。</InlineMessage> : null}
           </div>
-          {draft.cookie && draft.userId ? <InlineMessage tone="success">Cookie 和用户 ID 已填写，保存前可在最后一步测试连接。</InlineMessage> : null}
-        </div>
+        </details>
       ) : null}
 
       {!isAndroidApp && draft.kind === 'sub2api' ? (
@@ -546,7 +682,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
           <div className="form-grid">
             <label className="field"><span>渠道名称 <b aria-hidden="true">*</b></span><input autoFocus value={draft.name} onChange={(event) => update({ name: event.target.value })} placeholder="例如：主站额度" /></label>
             <label className="field"><span>渠道类型</span><select value={draft.kind} onChange={(event) => changeKind(event.target.value as TargetKind)}>{Object.entries(targetKindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <div className="field span-2"><label htmlFor="target-base-url">站点地址 <b aria-hidden="true">*</b></label><div className="url-detect-row"><input id="target-base-url" type="url" value={draft.baseUrl} onChange={(event) => { update({ baseUrl: event.target.value }); setDetectionMessage('') }} onBlur={() => { if (!draft.topupUrl) update({ topupUrl: getTopupCandidate(draft.baseUrl, draft.kind) }) }} placeholder="https://api.example.com" inputMode="url" />{!editing ? <button className="button secondary" type="button" disabled={detectMutation.isPending || !draft.baseUrl.trim()} onClick={() => { setError(''); if (!validateUrl(draft.baseUrl)) { setError('请先输入有效的 HTTP 或 HTTPS 地址。'); return } detectMutation.mutate() }}>{detectMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Search aria-hidden="true" size={18} />}{detectMutation.isPending ? '识别中' : '自动识别'}</button> : null}</div><small>只允许 HTTP/HTTPS。服务器默认会阻止回环、内网和云元数据地址。</small></div>
+            <div className="field span-2"><label htmlFor="target-base-url">站点地址 <b aria-hidden="true">*</b></label><div className="url-detect-row"><input id="target-base-url" type="url" value={draft.baseUrl} onChange={(event) => { update({ baseUrl: event.target.value, browserAuthAttemptId: '' }); setAuthAttempt(null); setDetectionMessage('') }} onBlur={() => { if (!draft.topupUrl) update({ topupUrl: getTopupCandidate(draft.baseUrl, draft.kind) }) }} placeholder="https://api.example.com" inputMode="url" />{!editing ? <button className="button secondary" type="button" disabled={detectMutation.isPending || !draft.baseUrl.trim()} onClick={() => { setError(''); if (!validateUrl(draft.baseUrl)) { setError('请先输入有效的 HTTP 或 HTTPS 地址。'); return } detectMutation.mutate() }}>{detectMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Search aria-hidden="true" size={18} />}{detectMutation.isPending ? '识别中' : '自动识别'}</button> : null}</div><small>只允许 HTTP/HTTPS。服务器默认会阻止回环、内网和云元数据地址。</small></div>
             {detectionMessage ? <div className="span-2"><InlineMessage tone="success">{detectionMessage}</InlineMessage></div> : null}
             {detectMutation.error ? <div className="span-2"><InlineMessage tone="danger">{detectMutation.error.message}</InlineMessage></div> : null}
           </div>

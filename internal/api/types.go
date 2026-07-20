@@ -80,7 +80,7 @@ type accountResponse struct {
 	Type        string `json:"type"`
 	Status      string `json:"status"`
 	StatusText  string `json:"statusText,omitempty"`
-	ImageQuota  string `json:"imageQuota"`
+	ImageQuota  string `json:"imageQuota,omitempty"`
 	RecoveryAt  string `json:"recoveryAt,omitempty"`
 	Success     int64  `json:"success"`
 	Fail        int64  `json:"fail"`

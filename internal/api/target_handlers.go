@@ -895,15 +895,23 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 			return targetResponse{}, err
 		}
 		for _, account := range accounts {
-			result.Accounts = append(result.Accounts, accountResponse{
-				ID: account.ExternalID, DisplayName: account.DisplayName, Provider: account.Provider,
-				Email: account.Email, Type: account.Type, Status: account.Status, StatusText: account.StatusText,
-				ImageQuota: strconv.FormatInt(account.Quota, 10), RecoveryAt: account.RestoreAt,
-				Success: account.Success, Fail: account.Fail,
-			})
+			result.Accounts = append(result.Accounts, mapAccountResponse(target.Kind, account))
 		}
 	}
 	return result, nil
+}
+
+func mapAccountResponse(targetKind string, account store.ChatAccount) accountResponse {
+	result := accountResponse{
+		ID: account.ExternalID, DisplayName: account.DisplayName, Provider: account.Provider,
+		Email: account.Email, Type: account.Type, Status: account.Status, StatusText: account.StatusText,
+		RecoveryAt: account.RestoreAt, Success: account.Success, Fail: account.Fail,
+	}
+	// 图片额度只属于 chatgpt2api，CLIProxyAPI 账号响应不携带没有实际含义的零值字段。
+	if targetKind == string(monitor.TargetKindChatGPT2API) {
+		result.ImageQuota = strconv.FormatInt(account.Quota, 10)
+	}
+	return result
 }
 
 func mapMonitorMetrics(metrics []monitor.Metric, targetStatus string) []metricResponse {

@@ -53,3 +53,18 @@ test('Service Worker：已注册并可检查更新', async ({ page }) => {
   expect(registration.active).toBe(true)
   expect(registration.scope).toContain('/')
 })
+
+test('390×844：New API 一键读取仅显示当前填写地址且无横向滚动', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/targets/new')
+
+  await page.getByLabel(/渠道名称/).fill('当前地址渠道')
+  await page.getByLabel(/站点地址/).fill('https://current.example.com')
+  await page.getByRole('button', { name: '下一步' }).click()
+
+  await expect(page.getByText('读取当前填写地址')).toBeVisible()
+  await expect(page.getByText('只读取第一步填写的渠道地址，从当前浏览器中取得该站点的会话和用户 ID。')).toBeVisible()
+  await expect(page.getByRole('button', { name: '启用一键读取' })).toBeVisible()
+  await expect(page.getByText('手工填写 Cookie 和用户 ID')).toBeVisible()
+  await expectNoHorizontalScroll(page)
+})

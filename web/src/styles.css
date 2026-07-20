@@ -1456,6 +1456,78 @@ tbody tr:hover {
   border-radius: 999px;
 }
 
+/* 浏览器助手在桌面和手机上保持紧凑布局，安装说明按需展开。 */
+.browser-helper-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.browser-helper-title {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.browser-helper-title > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.browser-helper-title small {
+  color: var(--text-secondary);
+}
+
+.helper-status-badge {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 11px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.browser-helper-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 12px 12px 34px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border-radius: 7px;
+}
+
+.manual-auth-details {
+  border-top: 1px solid var(--border);
+}
+
+.manual-auth-details > summary {
+  min-height: 44px;
+  padding: 12px 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.manual-auth-details .manual-auth-import {
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
 .manual-auth-import {
   display: flex;
   min-width: 0;
@@ -2398,6 +2470,10 @@ tbody tr:hover {
 
   .browser-auth-actions .button {
     flex: 1 1 100%;
+  }
+
+  .browser-helper-title {
+    flex-direction: column;
   }
 
   .manual-auth-import > .button {

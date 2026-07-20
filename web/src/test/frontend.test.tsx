@@ -79,8 +79,8 @@ describe('渠道向导', () => {
     expect(screen.getByText('支持 Linux.do、GitHub 等站点网页登录。')).toBeInTheDocument()
   })
 
-  it('网页登录先准备任务再由真实点击打开渠道页面', async () => {
-    vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue({
+  it('Sub2API 网页登录先准备任务再由真实点击打开渠道页面', async () => {
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue({
       id: 'auth_0123456789abcdef0123456789abcdef',
       status: 'waiting',
       loginUrl: 'https://api.example.com/login',
@@ -93,13 +93,165 @@ describe('渠道向导', () => {
       </MemoryRouter>
     )
     fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '授权渠道' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'sub2api' } })
     fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     fireEvent.click(screen.getByRole('button', { name: '准备网页登录' }))
     const launch = await screen.findByRole('button', { name: '打开授权窗口' })
+    expect(createAttempt).toHaveBeenCalledWith({ kind: 'sub2api', baseUrl: 'https://api.example.com' })
     expect(open).not.toHaveBeenCalled()
     fireEvent.click(launch)
     expect(open).toHaveBeenCalledWith('https://api.example.com/login', '_blank', 'noopener,noreferrer')
+  })
+
+  it('New API 浏览器助手只读取第一步当前地址并接管授权结果', async () => {
+    const waitingAttempt = {
+      id: 'auth_current_address_0123456789abcdef',
+      status: 'waiting' as const,
+      loginUrl: 'https://current.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue(waitingAttempt)
+    const readAttempt = vi.spyOn(api, 'targetAuthAttempt').mockResolvedValue({
+      ...waitingAttempt,
+      status: 'ready',
+      userId: '10086',
+      message: '网页登录成功，凭据已接管。'
+    })
+    const postMessage = vi.spyOn(window, 'postMessage')
+
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '当前地址渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://old.example.com' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://current.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getByText('只读取第一步填写的渠道地址，从当前浏览器中取得该站点的会话和用户 ID。')).toBeInTheDocument()
+    await waitFor(() => expect(postMessage).toHaveBeenCalledWith(
+      { source: 'poolwatch-page', type: 'POOLWATCH_BROWSER_HELPER_PING' },
+      window.location.origin
+    ))
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+      }))
+    })
+    expect(await screen.findByText('已连接')).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+
+    await waitFor(() => expect(createAttempt).toHaveBeenCalledWith({
+      kind: 'new_api',
+      baseUrl: 'https://current.example.com'
+    }))
+    const importCall = await waitFor(() => {
+      const call = postMessage.mock.calls.find(([message]) => message?.type === 'POOLWATCH_IMPORT_NEW_API')
+      expect(call).toBeDefined()
+      return call!
+    })
+    const importMessage = importCall[0]
+    expect(importMessage).toEqual({
+      source: 'poolwatch-page',
+      type: 'POOLWATCH_IMPORT_NEW_API',
+      requestId: expect.any(String),
+      attemptId: waitingAttempt.id
+    })
+    expect(importCall[1]).toBe(window.location.origin)
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_IMPORT_RESULT',
+          requestId: importMessage.requestId,
+          attemptId: waitingAttempt.id,
+          ok: true,
+          message: '已读取登录会话。'
+        }
+      }))
+    })
+
+    await waitFor(() => expect(readAttempt).toHaveBeenCalledWith(waitingAttempt.id))
+    expect(await screen.findByText('网页登录成功，凭据已接管。')).toBeInTheDocument()
+    expect(screen.getByText('已配置')).toBeInTheDocument()
+  })
+
+  it('New API 修改第一步地址后为新地址创建任务且不复用旧任务', async () => {
+    const oldAttempt = {
+      id: 'auth_old_address_0123456789abcdef',
+      status: 'waiting' as const,
+      loginUrl: 'https://old.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    const newAttempt = {
+      id: 'auth_new_address_0123456789abcdef',
+      status: 'waiting' as const,
+      loginUrl: 'https://new.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt')
+      .mockResolvedValueOnce(oldAttempt)
+      .mockResolvedValueOnce(newAttempt)
+    vi.spyOn(api, 'targetAuthAttempt').mockResolvedValue(oldAttempt)
+    const postMessage = vi.spyOn(window, 'postMessage')
+    const announceHelperReady = () => {
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: window,
+          origin: window.location.origin,
+          data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+        }))
+      })
+    }
+
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '切换地址渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://old.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    await screen.findByRole('button', { name: '启用一键读取' })
+    announceHelperReady()
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+
+    await waitFor(() => expect(createAttempt).toHaveBeenNthCalledWith(1, {
+      kind: 'new_api',
+      baseUrl: 'https://old.example.com'
+    }))
+    await waitFor(() => expect(postMessage.mock.calls.some(([message]) => (
+      message?.type === 'POOLWATCH_IMPORT_NEW_API' && message.attemptId === oldAttempt.id
+    ))).toBe(true))
+
+    fireEvent.click(screen.getByRole('button', { name: '上一步' }))
+    fireEvent.change(await screen.findByLabelText(/站点地址/), { target: { value: 'https://new.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    await screen.findByRole('button', { name: '启用一键读取' })
+    announceHelperReady()
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+
+    await waitFor(() => expect(createAttempt).toHaveBeenNthCalledWith(2, {
+      kind: 'new_api',
+      baseUrl: 'https://new.example.com'
+    }))
+    const importMessages = postMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message?.type === 'POOLWATCH_IMPORT_NEW_API')
+    expect(importMessages).toHaveLength(2)
+    expect(importMessages[1]).toEqual({
+      source: 'poolwatch-page',
+      type: 'POOLWATCH_IMPORT_NEW_API',
+      requestId: expect.any(String),
+      attemptId: newAttempt.id
+    })
   })
 
   it('Sub2API OAuth 回调只解析同源 fragment 且不保留完整地址', () => {

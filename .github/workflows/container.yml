@@ -47,6 +47,13 @@ jobs:
         working-directory: web
         run: npm ci
 
+      - name: 检查浏览器助手
+        run: |
+          node --check browser-extension/background.js
+          node --check browser-extension/content.js
+          node --check browser-extension/options.js
+          node -e "JSON.parse(require('node:fs').readFileSync('browser-extension/manifest.json', 'utf8'))"
+
       - name: 运行前端测试
         working-directory: web
         run: npm test
