@@ -96,6 +96,7 @@ import com.zzlye.poolwatch.monitoring.MonitoringScheduler
 import com.zzlye.poolwatch.monitoring.NotificationHelper
 import com.zzlye.poolwatch.monitoring.RealtimeMonitorService
 import com.zzlye.poolwatch.monitoring.SeenAlertStore
+import com.zzlye.poolwatch.ui.drawerGesturesEnabled
 import com.zzlye.poolwatch.ui.PoolWatchTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -224,6 +225,8 @@ private fun PoolWatchApp(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        // 关闭时禁用滑开以避免纵向滚动误触，打开后仍允许滑动关闭。
+        gesturesEnabled = drawerGesturesEnabled(drawerState.isOpen),
         drawerContent = {
             ModalDrawerSheet(modifier = Modifier.width(340.dp)) {
                 NativeSettingsPanel(

@@ -3,10 +3,64 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestMigrationAddsGeneralAccountColumns(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("创建旧数据库目录失败: %v", err)
+	}
+	legacy, err := sql.Open("sqlite", filepath.Join(dataDir, "poolwatch.db"))
+	if err != nil {
+		t.Fatalf("打开旧数据库失败: %v", err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE chat_accounts (
+		target_id TEXT NOT NULL,
+		external_id TEXT NOT NULL,
+		email TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL,
+		quota INTEGER NOT NULL DEFAULT 0,
+		restore_at TEXT NOT NULL DEFAULT '',
+		success INTEGER NOT NULL DEFAULT 0,
+		fail INTEGER NOT NULL DEFAULT 0,
+		observed_at TEXT NOT NULL,
+		PRIMARY KEY(target_id, external_id)
+	)`)
+	if closeErr := legacy.Close(); err != nil || closeErr != nil {
+		t.Fatalf("准备旧账号表失败: %v, 关闭错误: %v", err, closeErr)
+	}
+
+	database, err := Open(dataDir)
+	if err != nil {
+		t.Fatalf("升级旧数据库失败: %v", err)
+	}
+	defer database.Close()
+	columns := map[string]bool{}
+	rows, err := database.DB().Query(`PRAGMA table_info(chat_accounts)`)
+	if err != nil {
+		t.Fatalf("读取升级后字段失败: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, fieldType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("读取升级字段失败: %v", err)
+		}
+		columns[name] = true
+	}
+	for _, name := range []string{"display_name", "provider", "status_text"} {
+		if !columns[name] {
+			t.Fatalf("旧账号表升级后缺少字段：%s", name)
+		}
+	}
+}
 
 func TestStoreMigrationAndAuthenticationLifecycle(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "nested", "data")
@@ -82,6 +136,60 @@ func TestSnapshotLimitKeepsNewestPointsInAscendingOrder(t *testing.T) {
 	}
 	if !items[0].ObservedAt.Equal(now.Add(2*time.Second)) || !items[1].ObservedAt.Equal(now.Add(3*time.Second)) {
 		t.Fatalf("历史应保留最新数据并按时间升序返回: %#v", items)
+	}
+}
+
+func TestChatAccounts支持泛化安全字段(t *testing.T) {
+	database, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 20, 16, 0, 0, 0, time.UTC)
+	target := Target{
+		ID: "target_cli_accounts", Name: "CLIProxyAPI", Kind: "cliproxyapi", BaseURL: "https://example.com",
+		Enabled: true, PollIntervalSeconds: 300, ConfigJSON: "{}", Status: "healthy", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateTarget(ctx, target); err != nil {
+		t.Fatalf("创建渠道失败: %v", err)
+	}
+	if err := database.ReplaceChatAccounts(ctx, target.ID, []ChatAccount{{
+		TargetID: target.ID, ExternalID: "hashed-id", DisplayName: "主账号", Provider: "codex",
+		Email: "pr***@example.com", Type: "plus", Status: "warning", StatusText: "额度冷却中",
+		RestoreAt: "2026-07-21T00:00:00Z", Success: 8, Fail: 2, ObservedAt: now,
+	}}); err != nil {
+		t.Fatalf("保存泛化账号失败: %v", err)
+	}
+	accounts, err := database.ListChatAccounts(ctx, target.ID)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("读取泛化账号失败：%#v, %v", accounts, err)
+	}
+	account := accounts[0]
+	if account.DisplayName != "主账号" || account.Provider != "codex" || account.StatusText != "额度冷却中" ||
+		account.Success != 8 || account.Fail != 2 {
+		t.Fatalf("泛化账号字段不完整：%#v", account)
+	}
+
+	columns := map[string]bool{}
+	rows, err := database.DB().QueryContext(ctx, `PRAGMA table_info(chat_accounts)`)
+	if err != nil {
+		t.Fatalf("读取账号表结构失败: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, fieldType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("读取账号表字段失败: %v", err)
+		}
+		columns[name] = true
+	}
+	for _, name := range []string{"display_name", "provider", "status_text"} {
+		if !columns[name] {
+			t.Fatalf("账号表缺少迁移字段：%s", name)
+		}
 	}
 }
 

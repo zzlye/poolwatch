@@ -13,6 +13,19 @@ func (registry *Registry) Detect(ctx context.Context, baseURL string, allowPriva
 		return "", checkError(ErrorClassConfig, "自动识别渠道", "监控适配器注册器未初始化", 0, nil)
 	}
 	session := registry.http.newSession(allowPrivate)
+	rootURL, err := joinTargetURL(baseURL, "/")
+	if err != nil {
+		return "", err
+	}
+	var rootPayload any
+	rootErr := session.doJSON(ctx, http.MethodGet, rootURL, nil, nil, &rootPayload)
+	if rootErr == nil && isCLIProxyAPIRoot(rootPayload) {
+		return TargetKindCLIProxyAPI, nil
+	}
+	if shouldAbortDetection(rootErr) {
+		return "", rootErr
+	}
+
 	healthURL, err := joinTargetURL(baseURL, "/health?format=json")
 	if err != nil {
 		return "", err
@@ -69,12 +82,37 @@ func (registry *Registry) Detect(ctx context.Context, baseURL string, allowPriva
 		}
 	}
 
-	for _, candidate := range []error{healthErr, statusErr} {
+	for _, candidate := range []error{rootErr, healthErr, statusErr} {
 		if candidate != nil && ErrorClassOf(candidate) == ErrorClassServer {
 			return "", candidate
 		}
 	}
 	return "", checkError(ErrorClassResponse, "自动识别渠道", "无法识别渠道类型，请选择自定义 HTTP", 0, nil)
+}
+
+func isCLIProxyAPIRoot(payload any) bool {
+	root, ok := payload.(map[string]any)
+	if !ok || stringField(root, "message") != "CLI Proxy API Server" {
+		return false
+	}
+	endpoints, ok := root["endpoints"].([]any)
+	if !ok {
+		return false
+	}
+	foundChat, foundModels := false, false
+	for _, endpoint := range endpoints {
+		value, ok := endpoint.(string)
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(value) {
+		case "POST /v1/chat/completions":
+			foundChat = true
+		case "GET /v1/models":
+			foundModels = true
+		}
+	}
+	return foundChat && foundModels
 }
 
 func isChatGPT2APIHealth(payload any) bool {

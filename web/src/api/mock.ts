@@ -33,6 +33,25 @@ function makeMockChatAccounts(total: number): SanitizedAccount[] {
   }))
 }
 
+function makeMockCLIProxyAccounts(total: number): SanitizedAccount[] {
+  const providers = ['OpenAI', 'Anthropic', 'Gemini']
+  const types = ['OAuth', 'API Key']
+  const statuses: TargetStatus[] = ['healthy', 'warning', 'error', 'disabled']
+  // 模拟多个提供商和账号类型，用于验收 CLIProxyAPI 的独立筛选与分页。
+  return Array.from({ length: total }, (_, index) => ({
+    id: `cli-account-${index + 1}`,
+    displayName: `代理账号 ${index + 1}`,
+    email: `proxy${String(index + 1).padStart(2, '0')}***@example.com`,
+    provider: providers[index % providers.length],
+    type: types[index % types.length],
+    status: statuses[index % statuses.length],
+    statusText: statuses[index % statuses.length] === 'warning' ? '限流' : undefined,
+    recoveryAt: statuses[index % statuses.length] === 'warning' ? new Date(now + (index + 1) * 10 * 60_000).toISOString() : undefined,
+    success: 100 + index * 7,
+    fail: index % 5
+  }))
+}
+
 let targets: Target[] = [
   {
     id: 'new-api-main',
@@ -88,6 +107,27 @@ let targets: Target[] = [
       { key: 'error_accounts', label: '异常账号', value: '0', unit: '个', status: 'healthy' }
     ],
     accounts: makeMockChatAccounts(23)
+  },
+  {
+    id: 'cli-proxy-pool',
+    name: 'CLIProxyAPI 号池',
+    kind: 'cliproxyapi',
+    baseUrl: 'https://cli-proxy.example.com',
+    status: 'warning',
+    statusText: '存在限流账号',
+    enabled: true,
+    checkIntervalMinutes: 5,
+    lastCheckedAt: minutesAgo(3),
+    nextCheckAt: new Date(now + 2 * 60_000).toISOString(),
+    authConfigured: true,
+    metrics: [
+      { key: 'account_total', label: '账号总数', value: '11', unit: '个', status: 'healthy' },
+      { key: 'healthy_accounts', label: '可用账号', value: '8', unit: '个', threshold: '0', comparison: 'lte', status: 'healthy' },
+      { key: 'limited_accounts', label: '限流账号', value: '2', unit: '个', threshold: '1', comparison: 'gte', status: 'warning' },
+      { key: 'error_accounts', label: '异常账号', value: '0', unit: '个', threshold: '1', comparison: 'gte', status: 'healthy' },
+      { key: 'disabled_accounts', label: '禁用账号', value: '1', unit: '个', status: 'disabled' }
+    ],
+    accounts: makeMockCLIProxyAccounts(24)
   }
 ]
 
@@ -175,6 +215,7 @@ function targetFromDraft(draft: TargetDraft, id: string = crypto.randomUUID()): 
       value: '0',
       unit: threshold.unit,
       threshold: threshold.value,
+      comparison: threshold.comparison,
       status: 'unknown'
     }))
   }
@@ -214,6 +255,8 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     const address = String(body.baseUrl ?? '').toLowerCase()
     const kind = address.includes('sub')
       ? 'sub2api'
+      : address.includes('cliproxy') || address.includes('cli-proxy') || address.includes('router-for-me')
+        ? 'cliproxyapi'
       : address.includes('chat') || address.includes('pool')
         ? 'chatgpt2api'
         : address.includes('api')

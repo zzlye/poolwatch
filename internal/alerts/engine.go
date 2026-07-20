@@ -62,7 +62,7 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	}
 	thresholdWarning := false
 	for _, metric := range snapshot.Metrics {
-		if metric.Threshold != nil && shouldCompareThreshold(target.Kind, metric.Key) && metric.Value.LessThanOrEqual(*metric.Threshold) {
+		if metric.Threshold != nil && shouldCompareThreshold(target.Kind, metric.Key) && monitor.ThresholdBreached(metric) {
 			thresholdWarning = true
 		}
 	}
@@ -84,8 +84,8 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	if err := e.store.InsertSnapshot(ctx, storedSnapshot); err != nil {
 		return err
 	}
-	if target.Kind == string(monitor.TargetKindChatGPT2API) {
-		if err := e.store.ReplaceChatAccounts(ctx, target.ID, sanitizedAccounts(target.ID, snapshot.Accounts, observedAt)); err != nil {
+	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
+		if err := e.store.ReplaceChatAccounts(ctx, target.ID, sanitizedAccounts(target.Kind, target.ID, snapshot.Accounts, observedAt)); err != nil {
 			return err
 		}
 	}
@@ -94,16 +94,14 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 		if metric.Threshold == nil || !shouldCompareThreshold(target.Kind, metric.Key) {
 			continue
 		}
-		isLow := metric.Value.LessThanOrEqual(*metric.Threshold)
-		if isLow {
+		if monitor.ThresholdBreached(metric) {
 			if err := e.openThreshold(ctx, target, metric, observedAt); err != nil {
 				return err
 			}
 			continue
 		}
 		if err := e.recoverIncident(ctx, target, string(monitor.AlertTypeQuotaLow), string(metric.Key),
-			metric.Label+"已恢复", fmt.Sprintf("当前%s为 %s %s，已经高于阈值 %s %s。", metric.Label,
-				metric.Value.String(), metric.Unit, metric.Threshold.String(), metric.Unit), observedAt); err != nil {
+			metric.Label+"已恢复", thresholdRecoveryMessage(metric), observedAt); err != nil {
 			return err
 		}
 	}
@@ -191,6 +189,11 @@ func (e *Engine) openThreshold(ctx context.Context, target store.Target, metric 
 	title := metric.Label + "不足"
 	message := fmt.Sprintf("当前%s为 %s %s，已达到或低于阈值 %s %s。", metric.Label,
 		metric.Value.String(), metric.Unit, metric.Threshold.String(), metric.Unit)
+	if monitor.NormalizeThresholdComparison(metric.Comparison) == monitor.ThresholdComparisonGTE {
+		title = metric.Label + "过高"
+		message = fmt.Sprintf("当前%s为 %s %s，已达到或高于阈值 %s %s。", metric.Label,
+			metric.Value.String(), metric.Unit, metric.Threshold.String(), metric.Unit)
+	}
 	return e.openIncident(ctx, target, string(monitor.AlertTypeQuotaLow), string(metric.Key), title, message,
 		metric.Value.String(), metric.Threshold.String(), metric.Unit, "warning", now)
 }
@@ -260,20 +263,44 @@ func shouldCompareThreshold(targetKind string, metricKey monitor.MetricKey) bool
 	return targetKind != string(monitor.TargetKindChatGPT2API) || metricKey == monitor.MetricImageQuota
 }
 
-func sanitizedAccounts(targetID string, accounts []monitor.AccountStatus, observedAt time.Time) []store.ChatAccount {
+func thresholdRecoveryMessage(metric monitor.Metric) string {
+	if monitor.NormalizeThresholdComparison(metric.Comparison) == monitor.ThresholdComparisonGTE {
+		return fmt.Sprintf("当前%s为 %s %s，已经低于阈值 %s %s。", metric.Label,
+			metric.Value.String(), metric.Unit, metric.Threshold.String(), metric.Unit)
+	}
+	return fmt.Sprintf("当前%s为 %s %s，已经高于阈值 %s %s。", metric.Label,
+		metric.Value.String(), metric.Unit, metric.Threshold.String(), metric.Unit)
+}
+
+func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountStatus, observedAt time.Time) []store.ChatAccount {
 	result := make([]store.ChatAccount, 0, len(accounts))
 	for index, account := range accounts {
-		stableValue := strings.ToLower(strings.TrimSpace(account.Email)) + "|" + account.Type + fmt.Sprintf("|%d", index)
-		externalID := identity.HashToken(stableValue)[:24]
 		maskedEmail := maskEmail(account.Email)
-		// 不接受非邮箱值，避免上游将令牌伪装在账号字段中写入数据库或接口响应。
-		if maskedEmail == "" {
+		// chatgpt2api 没有独立安全标识，继续要求有效邮箱；CLIProxyAPI 可使用仅内部可见的上游标识生成哈希。
+		if targetKind == string(monitor.TargetKindChatGPT2API) && maskedEmail == "" {
 			continue
 		}
+		displayName := sanitizeAccountText(account.DisplayName, 120)
+		if maskedDisplayEmail := maskEmail(displayName); maskedDisplayEmail != "" {
+			displayName = maskedDisplayEmail
+		}
+		provider := sanitizeAccountText(account.Provider, 80)
+		accountType := sanitizeAccountText(account.Type, 80)
+		statusText := sanitizeAccountText(account.StatusText, 300)
+		recoveryAt := account.RecoveryAt
+		if recoveryAt == "" {
+			recoveryAt = account.RestoreAt
+		}
+		recoveryAt = sanitizeAccountText(recoveryAt, 100)
+		stableValue := strings.ToLower(strings.TrimSpace(account.ExternalID))
+		if stableValue == "" {
+			stableValue = strings.Join([]string{maskedEmail, displayName, provider, accountType, fmt.Sprintf("%d", index)}, "|")
+		}
+		externalID := identity.HashToken(targetKind + "|" + stableValue)[:24]
 		result = append(result, store.ChatAccount{
-			TargetID: targetID, ExternalID: externalID, Email: maskedEmail, Type: sanitizeAccountText(account.Type, 80),
-			Status: normalizeAccountStatus(account.Status), Quota: account.Quota.IntPart(), RestoreAt: sanitizeAccountText(account.RestoreAt, 100),
-			Success: account.Success, Fail: account.Fail, ObservedAt: observedAt,
+			TargetID: targetID, ExternalID: externalID, DisplayName: displayName, Provider: provider,
+			Email: maskedEmail, Type: accountType, Status: normalizeAccountStatus(account.Status), StatusText: statusText,
+			Quota: account.Quota.IntPart(), RestoreAt: recoveryAt, Success: account.Success, Fail: account.Fail, ObservedAt: observedAt,
 		})
 	}
 	return result
@@ -319,6 +346,9 @@ func isDisplayEmail(local, domain string) bool {
 
 func sanitizeAccountText(value string, maximum int) string {
 	value = truncate(value, maximum)
+	if looksLikeAccountSecret(value) {
+		return ""
+	}
 	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(value))
 	for _, marker := range []string{"token", "secret", "password", "cookie", "authorization", "apikey", "bearer"} {
 		// 账号类型和恢复时间只是展示辅助信息，疑似凭据时宁可留空也不能持久化。
@@ -327,6 +357,45 @@ func sanitizeAccountText(value string, maximum int) string {
 		}
 	}
 	return value
+}
+
+func looksLikeAccountSecret(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "sk-") || strings.Contains(lower, "sk_") {
+		return true
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) == 3 && accountTokenPart(parts[0], 8) && accountTokenPart(parts[1], 8) && accountTokenPart(parts[2], 8) {
+		return true
+	}
+	characters := []rune(value)
+	if len(characters) < 32 || strings.IndexFunc(value, func(character rune) bool {
+		return character == ' ' || character == '\t' || character == '\r' || character == '\n'
+	}) >= 0 {
+		return false
+	}
+	unique := make(map[rune]struct{})
+	for _, character := range characters {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("-_+/=.", character)) {
+			return false
+		}
+		unique[character] = struct{}{}
+	}
+	return len(unique) >= 10
+}
+
+func accountTokenPart(value string, minimum int) bool {
+	if len(value) < minimum {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeAccountStatus(status string) string {

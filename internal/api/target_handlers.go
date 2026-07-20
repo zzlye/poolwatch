@@ -324,7 +324,8 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 		return store.Target{}, monitor.TargetConfig{}, errors.New("渠道名称需要 1 至 100 个字符")
 	}
 	kind := monitor.TargetKind(strings.TrimSpace(draft.Kind))
-	if kind != monitor.TargetKindNewAPI && kind != monitor.TargetKindSub2API && kind != monitor.TargetKindChatGPT2API && kind != monitor.TargetKindCustom {
+	if kind != monitor.TargetKindNewAPI && kind != monitor.TargetKindSub2API && kind != monitor.TargetKindChatGPT2API &&
+		kind != monitor.TargetKindCLIProxyAPI && kind != monitor.TargetKindCustom {
 		return store.Target{}, monitor.TargetConfig{}, errors.New("渠道类型不受支持")
 	}
 	baseURL, err := validateHTTPURL(draft.BaseURL, true)
@@ -342,7 +343,10 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 		return store.Target{}, monitor.TargetConfig{}, errors.New("检测间隔需要在 1 至 1440 分钟之间")
 	}
 
-	config := storedTargetConfig{Thresholds: make(map[monitor.MetricKey]decimal.Decimal)}
+	config := storedTargetConfig{
+		Thresholds:           make(map[monitor.MetricKey]decimal.Decimal),
+		ThresholdComparisons: make(map[monitor.MetricKey]monitor.ThresholdComparison),
+	}
 	seenKeys := make(map[monitor.MetricKey]bool)
 	for index, threshold := range draft.Thresholds {
 		value, err := decimal.NewFromString(strings.TrimSpace(threshold.Value))
@@ -362,7 +366,18 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 		}
 		seenKeys[key] = true
 		config.Thresholds[key] = value
-		meta := thresholdDraft{Key: string(key), Label: strings.TrimSpace(threshold.Label), Value: value.String(), Unit: strings.TrimSpace(threshold.Unit)}
+		comparison := monitor.ThresholdComparison(strings.ToLower(strings.TrimSpace(threshold.Comparison)))
+		if comparison == "" {
+			comparison = monitor.ThresholdComparisonLTE
+		}
+		if comparison != monitor.ThresholdComparisonLTE && comparison != monitor.ThresholdComparisonGTE {
+			return store.Target{}, monitor.TargetConfig{}, errors.New("告警比较方式只支持 lte 或 gte")
+		}
+		config.ThresholdComparisons[key] = comparison
+		meta := thresholdDraft{
+			Key: string(key), Label: strings.TrimSpace(threshold.Label), Value: value.String(),
+			Unit: strings.TrimSpace(threshold.Unit), Comparison: string(comparison),
+		}
 		if meta.Label == "" {
 			meta.Label = metricLabel(key)
 		}
@@ -388,6 +403,9 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 	}
 	if kind == monitor.TargetKindChatGPT2API {
 		config.ChatGPT2API.IncludeAccounts = strings.TrimSpace(credential.AdminKey) != ""
+	}
+	if kind == monitor.TargetKindCLIProxyAPI && strings.TrimSpace(credential.AdminKey) == "" {
+		return store.Target{}, monitor.TargetConfig{}, errors.New("CLIProxyAPI 需要管理密钥")
 	}
 	if kind == monitor.TargetKindCustom {
 		customConfig, err := buildCustomConfig(draft, config.ThresholdMeta)
@@ -434,7 +452,8 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 	}
 	runtimeConfig := monitor.TargetConfig{
 		ID: target.ID, Name: target.Name, Kind: kind, BaseURL: target.BaseURL,
-		AllowPrivateNetwork: s.dependencies.AllowPrivateTargets, Thresholds: config.Thresholds, Credential: credential,
+		AllowPrivateNetwork: s.dependencies.AllowPrivateTargets, Thresholds: config.Thresholds,
+		ThresholdComparisons: config.ThresholdComparisons, Credential: credential,
 		NewAPI: config.NewAPI, ChatGPT2API: config.ChatGPT2API, Custom: config.Custom,
 	}
 	return target, runtimeConfig, nil
@@ -840,9 +859,11 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		for index := range metrics {
 			// 快照中的阈值属于历史配置，响应必须以渠道当前配置为准。
 			metrics[index].Threshold = nil
+			metrics[index].Comparison = ""
 			if threshold, exists := config.Thresholds[metrics[index].Key]; exists {
 				copyValue := threshold
 				metrics[index].Threshold = &copyValue
+				metrics[index].Comparison = monitor.NormalizeThresholdComparison(config.ThresholdComparisons[metrics[index].Key])
 			}
 			if target.Kind == string(monitor.TargetKindNewAPI) && metrics[index].Key == monitor.MetricSubscriptionBalance && !config.NewAPI.IncludeSubscription {
 				continue
@@ -863,18 +884,22 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		}
 		// 尚未读取到的已配置指标仍需返回，确保编辑页面不会意外关闭监控项。
 		result.Metrics = append(result.Metrics, metricResponse{
-			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, Threshold: meta.Value, Status: string(monitor.TargetStatusUnknown),
+			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, Threshold: meta.Value,
+			Comparison: string(monitor.NormalizeThresholdComparison(monitor.ThresholdComparison(meta.Comparison))),
+			Status:     string(monitor.TargetStatusUnknown),
 		})
 	}
-	if target.Kind == string(monitor.TargetKindChatGPT2API) {
+	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
 		accounts, err := s.dependencies.Store.ListChatAccounts(ctx, target.ID)
 		if err != nil {
 			return targetResponse{}, err
 		}
 		for _, account := range accounts {
 			result.Accounts = append(result.Accounts, accountResponse{
-				ID: account.ExternalID, Email: account.Email, Type: account.Type, Status: account.Status,
+				ID: account.ExternalID, DisplayName: account.DisplayName, Provider: account.Provider,
+				Email: account.Email, Type: account.Type, Status: account.Status, StatusText: account.StatusText,
 				ImageQuota: strconv.FormatInt(account.Quota, 10), RecoveryAt: account.RestoreAt,
+				Success: account.Success, Fail: account.Fail,
 			})
 		}
 	}
@@ -887,12 +912,13 @@ func mapMonitorMetrics(metrics []monitor.Metric, targetStatus string) []metricRe
 		status := string(monitor.TargetStatusHealthy)
 		if targetStatus == string(monitor.TargetStatusError) {
 			status = targetStatus
-		} else if metric.Threshold != nil && metric.Value.LessThanOrEqual(*metric.Threshold) {
+		} else if monitor.ThresholdBreached(metric) {
 			status = string(monitor.TargetStatusWarning)
 		}
 		item := metricResponse{Key: string(metric.Key), Label: metric.Label, Value: metric.Value.String(), Unit: metric.Unit, Status: status}
 		if metric.Threshold != nil {
 			item.Threshold = metric.Threshold.String()
+			item.Comparison = string(monitor.NormalizeThresholdComparison(metric.Comparison))
 		}
 		result = append(result, item)
 	}
@@ -945,7 +971,7 @@ func mergeString(destination *string, value string) {
 func metricLabel(key monitor.MetricKey) string {
 	labels := map[monitor.MetricKey]string{
 		monitor.MetricWalletBalance: "钱包余额", monitor.MetricSubscriptionBalance: "订阅额度",
-		monitor.MetricImageQuota: "图片额度", monitor.MetricHealthyAccounts: "正常账号",
+		monitor.MetricImageQuota: "图片额度", monitor.MetricAccountTotal: "账号总数", monitor.MetricHealthyAccounts: "正常账号",
 		monitor.MetricLimitedAccounts: "限流账号", monitor.MetricErrorAccounts: "异常账号",
 		monitor.MetricDisabledAccounts: "禁用账号", monitor.MetricCustomValue: "自定义指标",
 	}
@@ -963,6 +989,8 @@ func targetKindLabel(kind monitor.TargetKind) string {
 		return "Sub2API"
 	case monitor.TargetKindChatGPT2API:
 		return "chatgpt2api"
+	case monitor.TargetKindCLIProxyAPI:
+		return "CLIProxyAPI"
 	default:
 		return "自定义 HTTP"
 	}

@@ -128,6 +128,54 @@ describe('渠道向导', () => {
     detect.mockRestore()
   })
 
+  it('CLIProxyAPI 仅填写管理密钥并使用三项默认告警方向', async () => {
+    const create = vi.spyOn(api, 'createTarget').mockResolvedValue({
+      id: 'cli-proxy-1',
+      name: '代理号池',
+      kind: 'cliproxyapi',
+      baseUrl: 'https://proxy.example.com',
+      status: 'unknown',
+      statusText: '等待检测',
+      enabled: true,
+      checkIntervalMinutes: 5,
+      authConfigured: true,
+      metrics: []
+    })
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '代理号池' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'cliproxyapi' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://proxy.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getByLabelText('管理密钥')).toBeInTheDocument()
+    expect(screen.getByText('管理密钥仅用于只读查询账号状态与统计，不会启停、重置或删除账号。')).toBeInTheDocument()
+    expect(screen.queryByText('选择登录方式')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('管理密钥'), { target: { value: 'management-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getAllByLabelText('告警条件').map((element) => (element as HTMLSelectElement).value)).toEqual(['lte', 'gte', 'gte'])
+    expect(screen.getAllByLabelText('告警阈值').map((element) => (element as HTMLInputElement).value)).toEqual(['0', '1', '1'])
+    expect(screen.getByText('healthy_accounts')).toBeInTheDocument()
+    expect(screen.getByText('limited_accounts')).toBeInTheDocument()
+    expect(screen.getByText('error_accounts')).toBeInTheDocument()
+    expect(screen.queryByText('disabled_accounts')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加渠道' }))
+    await waitFor(() => expect(create).toHaveBeenCalledOnce())
+    expect(create.mock.calls[0][0].thresholds).toEqual([
+      expect.objectContaining({ key: 'healthy_accounts', comparison: 'lte' }),
+      expect.objectContaining({ key: 'limited_accounts', comparison: 'gte' }),
+      expect.objectContaining({ key: 'error_accounts', comparison: 'gte' })
+    ])
+    create.mockRestore()
+  })
+
   it('编辑自定义渠道时只回填非秘密配置', () => {
     const target: Target = {
       id: 'custom-1',
@@ -158,6 +206,7 @@ describe('渠道向导', () => {
     expect(draft.password).toBe('')
     expect(draft.accessToken).toBe('')
     expect(draft.totpSecret).toBe('')
+    expect(draft.thresholds[0].comparison).toBe('lte')
   })
 
   it('可以关闭 New API 订阅监控且保留零阈值语义', async () => {
@@ -242,6 +291,38 @@ describe('状态和趋势', () => {
     render(<LineChart snapshots={snapshots} threshold="20" label="钱包余额" unit="元" />)
     expect(screen.getByRole('img', { name: '钱包余额趋势，共 2 个数据点' })).toBeInTheDocument()
     expect(screen.getByText((_, element) => element?.classList.contains('chart-legend') ?? false)).toHaveTextContent('告警阈值')
+  })
+
+  it('大于等于阈值在指标卡、趋势图和历史表格中使用同一方向', async () => {
+    const cliTarget: Target = {
+      id: 'cli-target',
+      name: '代理号池',
+      kind: 'cliproxyapi',
+      baseUrl: 'https://proxy.example.com',
+      status: 'warning',
+      statusText: '存在限流账号',
+      enabled: true,
+      checkIntervalMinutes: 5,
+      authConfigured: true,
+      metrics: [{ key: 'limited_accounts', label: '限流账号', value: '2', unit: '个', threshold: '1', comparison: 'gte', status: 'warning' }]
+    }
+    const snapshots: Snapshot[] = [
+      { id: '1', targetId: 'cli-target', metricKey: 'limited_accounts', value: '0', unit: '个', measuredAt: '2026-07-18T10:00:00Z' },
+      { id: '2', targetId: 'cli-target', metricKey: 'limited_accounts', value: '1', unit: '个', measuredAt: '2026-07-18T11:00:00Z' }
+    ]
+    const target = vi.spyOn(api, 'target').mockResolvedValue(cliTarget)
+    const history = vi.spyOn(api, 'history').mockResolvedValue({ target: cliTarget, snapshots })
+
+    renderWithClient(<MemoryRouter initialEntries={['/targets/cli-target']}><Routes><Route path="/targets/:id" element={<TargetDetailPage />} /></Routes></MemoryRouter>)
+
+    expect(await screen.findByText('告警条件 ≥ 1 个')).toBeInTheDocument()
+    await screen.findByRole('img', { name: '限流账号趋势，共 2 个数据点' })
+    expect(screen.getByText((_, element) => element?.classList.contains('chart-legend') ?? false)).toHaveTextContent('告警阈值（≥）')
+    fireEvent.click(screen.getByText('查看同数据表格'))
+    expect(screen.getByText('低于阈值')).toBeInTheDocument()
+    expect(screen.getByText('达到告警条件')).toBeInTheDocument()
+    target.mockRestore()
+    history.mockRestore()
   })
 })
 

@@ -701,6 +701,47 @@ tbody tr:hover {
   overflow-wrap: anywhere;
 }
 
+.cliproxy-account-table-wrap {
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+.cliproxy-account-table {
+  table-layout: fixed;
+}
+
+.cliproxy-account-table th:first-child {
+  width: 24%;
+}
+
+.cliproxy-account-table th:nth-child(2),
+.cliproxy-account-table th:nth-child(4) {
+  width: 13%;
+}
+
+.cliproxy-account-table th:nth-child(3) {
+  width: 12%;
+}
+
+.cliproxy-account-table th:nth-child(5),
+.cliproxy-account-table th:nth-child(6) {
+  width: 9%;
+}
+
+.cliproxy-account-table th:nth-child(7) {
+  width: 20%;
+}
+
+.cliproxy-account-table td {
+  overflow-wrap: anywhere;
+}
+
+.cliproxy-account-table td:first-child small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+}
+
 .account-pagination {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1481,7 +1522,7 @@ tbody tr:hover {
 
 .threshold-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1.2fr) minmax(140px, 1fr) minmax(110px, 0.7fr) auto;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(165px, 0.9fr) minmax(120px, 0.75fr) minmax(105px, 0.65fr);
   align-items: end;
   gap: 12px;
   padding: 14px;
@@ -2484,6 +2525,111 @@ tbody tr:hover {
   .account-table td:nth-child(2)::before,
   .account-table td:nth-child(4)::before,
   .account-table td:nth-child(5)::before {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-secondary);
+    content: attr(data-label);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .cliproxy-account-table-wrap {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .cliproxy-account-table,
+  .cliproxy-account-table tbody {
+    display: block;
+  }
+
+  .cliproxy-account-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .cliproxy-account-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .cliproxy-account-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .cliproxy-account-table td {
+    min-width: 0;
+    padding: 8px;
+    background: var(--surface-muted);
+    border: 0;
+    border-radius: 6px;
+    font-weight: 650;
+  }
+
+  .cliproxy-account-table td:first-child,
+  .cliproxy-account-table td:nth-child(4) {
+    align-self: start;
+    padding: 0;
+    background: transparent;
+  }
+
+  .cliproxy-account-table td:first-child {
+    grid-column: 1;
+    grid-row: 1;
+    overflow-wrap: anywhere;
+  }
+
+  .cliproxy-account-table td:nth-child(4) {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+  }
+
+  .cliproxy-account-table td:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .cliproxy-account-table td:nth-child(3) {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .cliproxy-account-table td:nth-child(5) {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  .cliproxy-account-table td:nth-child(6) {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .cliproxy-account-table td:nth-child(7) {
+    grid-column: 1 / -1;
+    grid-row: 4;
+  }
+
+  .cliproxy-account-table td:nth-child(2)::before,
+  .cliproxy-account-table td:nth-child(3)::before,
+  .cliproxy-account-table td:nth-child(5)::before,
+  .cliproxy-account-table td:nth-child(6)::before,
+  .cliproxy-account-table td:nth-child(7)::before {
     display: block;
     margin-bottom: 2px;
     color: var(--text-secondary);

@@ -9,6 +9,10 @@ function primaryMetric(target: Target) {
   return target.metrics.find((metric) => ['wallet_balance', 'subscription_balance', 'image_quota'].includes(metric.key)) ?? target.metrics[0]
 }
 
+function thresholdLabel(comparison: 'lte' | 'gte' | undefined, value: string, unit: string): string {
+  return `告警 ${comparison === 'gte' ? '≥' : '≤'} ${value} ${unit}`
+}
+
 export function TargetTable({ targets }: { targets: Target[] }) {
   return (
     <div className="table-wrap desktop-table">
@@ -31,7 +35,7 @@ export function TargetTable({ targets }: { targets: Target[] }) {
                   <Link className="target-name-link" to={`/targets/${target.id}`}><strong>{target.name}</strong><span>{targetKindLabels[target.kind]} · {redactHost(target.baseUrl)}</span></Link>
                 </td>
                 <td><StatusPill status={target.enabled ? target.status : 'disabled'} label={target.enabled ? target.statusText : '已停用'} /></td>
-                <td>{metric ? <span className="metric-cell"><strong>{formatMetric(metric.value, metric.unit)}</strong>{metric.threshold ? <small>阈值 {metric.threshold} {metric.unit}</small> : null}</span> : '暂无指标'}</td>
+                <td>{metric ? <span className="metric-cell"><strong>{formatMetric(metric.value, metric.unit)}</strong>{metric.threshold !== undefined ? <small>{thresholdLabel(metric.comparison, metric.threshold, metric.unit)}</small> : null}</span> : '暂无指标'}</td>
                 <td><span title={target.lastCheckedAt}>{formatRelativeTime(target.lastCheckedAt)}</span></td>
                 <td className="row-action"><Link className="icon-button" to={`/targets/${target.id}`} aria-label={`查看 ${target.name}`}><ChevronRight aria-hidden="true" size={20} /></Link></td>
               </tr>

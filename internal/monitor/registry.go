@@ -14,13 +14,14 @@ type Registry struct {
 	http     *secureHTTPClient
 }
 
-// NewRegistry 创建带默认四种适配器的注册器。
+// NewRegistry 创建带默认内置适配器的注册器。
 func NewRegistry(options HTTPOptions) *Registry {
 	httpClient := newSecureHTTPClient(options)
 	registry := &Registry{adapters: make(map[TargetKind]Adapter), http: httpClient}
 	registry.Register(newNewAPIAdapter(httpClient))
 	registry.Register(newSub2APIAdapter(httpClient))
 	registry.Register(newChatGPT2APIAdapter(httpClient))
+	registry.Register(newCLIProxyAPIAdapter(httpClient))
 	registry.Register(newCustomHTTPAdapter(httpClient))
 	return registry
 }

@@ -16,10 +16,11 @@ type bootstrapResponse struct {
 }
 
 type thresholdDraft struct {
-	Key   string `json:"key"`
-	Label string `json:"label"`
-	Value string `json:"value"`
-	Unit  string `json:"unit"`
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Value      string `json:"value"`
+	Unit       string `json:"unit"`
+	Comparison string `json:"comparison,omitempty"`
 }
 
 type credentialMode string
@@ -62,21 +63,27 @@ type targetDraft struct {
 }
 
 type metricResponse struct {
-	Key       string `json:"key"`
-	Label     string `json:"label"`
-	Value     string `json:"value"`
-	Unit      string `json:"unit"`
-	Threshold string `json:"threshold,omitempty"`
-	Status    string `json:"status"`
+	Key        string `json:"key"`
+	Label      string `json:"label"`
+	Value      string `json:"value"`
+	Unit       string `json:"unit"`
+	Threshold  string `json:"threshold,omitempty"`
+	Comparison string `json:"comparison,omitempty"`
+	Status     string `json:"status"`
 }
 
 type accountResponse struct {
-	ID         string `json:"id"`
-	Email      string `json:"email"`
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	ImageQuota string `json:"imageQuota"`
-	RecoveryAt string `json:"recoveryAt,omitempty"`
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	Email       string `json:"email"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	StatusText  string `json:"statusText,omitempty"`
+	ImageQuota  string `json:"imageQuota"`
+	RecoveryAt  string `json:"recoveryAt,omitempty"`
+	Success     int64  `json:"success"`
+	Fail        int64  `json:"fail"`
 }
 
 type targetResponse struct {
@@ -135,10 +142,11 @@ type settingsResponse struct {
 }
 
 type storedTargetConfig struct {
-	Thresholds     map[monitor.MetricKey]decimal.Decimal `json:"thresholds,omitempty"`
-	ThresholdMeta  []thresholdDraft                      `json:"threshold_meta,omitempty"`
-	CredentialMode credentialMode                        `json:"credential_mode,omitempty"`
-	NewAPI         monitor.NewAPIConfig                  `json:"new_api,omitempty"`
-	ChatGPT2API    monitor.ChatGPT2APIConfig             `json:"chatgpt2api,omitempty"`
-	Custom         monitor.CustomHTTPConfig              `json:"custom,omitempty"`
+	Thresholds           map[monitor.MetricKey]decimal.Decimal             `json:"thresholds,omitempty"`
+	ThresholdComparisons map[monitor.MetricKey]monitor.ThresholdComparison `json:"threshold_comparisons,omitempty"`
+	ThresholdMeta        []thresholdDraft                                  `json:"threshold_meta,omitempty"`
+	CredentialMode       credentialMode                                    `json:"credential_mode,omitempty"`
+	NewAPI               monitor.NewAPIConfig                              `json:"new_api,omitempty"`
+	ChatGPT2API          monitor.ChatGPT2APIConfig                         `json:"chatgpt2api,omitempty"`
+	Custom               monitor.CustomHTTPConfig                          `json:"custom,omitempty"`
 }

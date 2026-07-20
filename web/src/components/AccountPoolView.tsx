@@ -26,8 +26,8 @@ const accountStatusLabels: Record<TargetStatus, string> = {
 
 const pageSizeOptions = [10, 20, 50, 100]
 
-function normalizeAccountType(value: string): string {
-  return value.trim().toLocaleLowerCase()
+function normalizeAccountType(value?: string): string {
+  return value?.trim().toLocaleLowerCase() ?? ''
 }
 
 function buildPageItems(currentPage: number, totalPages: number): Array<number | string> {
@@ -57,7 +57,7 @@ export function AccountPoolView({ accounts }: { accounts: SanitizedAccount[] }) 
   const filteredAccounts = useMemo(() => {
     const keyword = search.trim().toLocaleLowerCase()
     return accounts.filter((account) => {
-      const matchesSearch = !keyword || account.email.toLocaleLowerCase().includes(keyword)
+      const matchesSearch = !keyword || (account.email ?? account.displayName ?? account.id).toLocaleLowerCase().includes(keyword)
       const matchesStatus = status === 'all' || account.status === status
       const matchesType = type === 'all' || normalizeAccountType(account.type) === type
       return matchesSearch && matchesStatus && matchesType
@@ -137,7 +137,7 @@ export function AccountPoolView({ accounts }: { accounts: SanitizedAccount[] }) 
         <div className="table-wrap account-table-wrap">
             <table className="account-table">
               <thead><tr><th scope="col">账号</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">图片额度</th><th scope="col">预计恢复</th></tr></thead>
-              <tbody>{pagedAccounts.map((account) => <tr key={account.id}><td data-label="账号"><strong>{account.email}</strong></td><td data-label="类型">{normalizeAccountType(account.type) || '—'}</td><td data-label="状态"><StatusPill status={account.status} label={accountStatusLabels[account.status]} /></td><td data-label="图片额度">{account.imageQuota} 次</td><td data-label="预计恢复">{account.recoveryAt ? formatDateTime(account.recoveryAt) : '—'}</td></tr>)}</tbody>
+              <tbody>{pagedAccounts.map((account) => <tr key={account.id}><td data-label="账号"><strong>{account.email ?? account.displayName ?? account.id}</strong></td><td data-label="类型">{normalizeAccountType(account.type) || '—'}</td><td data-label="状态"><StatusPill status={account.status} label={account.statusText || accountStatusLabels[account.status]} /></td><td data-label="图片额度">{account.imageQuota ?? '—'}{account.imageQuota !== undefined ? ' 次' : ''}</td><td data-label="预计恢复">{account.recoveryAt ? formatDateTime(account.recoveryAt) : '—'}</td></tr>)}</tbody>
             </table>
         </div>
       ) : (

@@ -15,8 +15,17 @@ const (
 	TargetKindNewAPI      TargetKind = "new_api"
 	TargetKindSub2API     TargetKind = "sub2api"
 	TargetKindChatGPT2API TargetKind = "chatgpt2api"
+	TargetKindCLIProxyAPI TargetKind = "cliproxyapi"
 	TargetKindCustom      TargetKind = "custom"
 	TargetKindCustomHTTP  TargetKind = TargetKindCustom
+)
+
+// ThresholdComparison 表示指标触发告警时使用的比较方向。
+type ThresholdComparison string
+
+const (
+	ThresholdComparisonLTE ThresholdComparison = "lte"
+	ThresholdComparisonGTE ThresholdComparison = "gte"
 )
 
 // MetricKey 表示不同渠道之间可统一识别的指标。
@@ -122,37 +131,45 @@ type CustomHTTPConfig struct {
 
 // TargetConfig 是适配器检测单个渠道所需的完整配置。
 type TargetConfig struct {
-	ID                  string                        `json:"id"`
-	Name                string                        `json:"name"`
-	Kind                TargetKind                    `json:"kind"`
-	BaseURL             string                        `json:"base_url"`
-	AllowPrivateNetwork bool                          `json:"allow_private_network"`
-	Thresholds          map[MetricKey]decimal.Decimal `json:"thresholds,omitempty"`
-	Credential          Credential                    `json:"credential"`
-	NewAPI              NewAPIConfig                  `json:"new_api,omitempty"`
-	ChatGPT2API         ChatGPT2APIConfig             `json:"chatgpt2api,omitempty"`
-	Custom              CustomHTTPConfig              `json:"custom,omitempty"`
+	ID                   string                            `json:"id"`
+	Name                 string                            `json:"name"`
+	Kind                 TargetKind                        `json:"kind"`
+	BaseURL              string                            `json:"base_url"`
+	AllowPrivateNetwork  bool                              `json:"allow_private_network"`
+	Thresholds           map[MetricKey]decimal.Decimal     `json:"thresholds,omitempty"`
+	ThresholdComparisons map[MetricKey]ThresholdComparison `json:"threshold_comparisons,omitempty"`
+	Credential           Credential                        `json:"credential"`
+	NewAPI               NewAPIConfig                      `json:"new_api,omitempty"`
+	ChatGPT2API          ChatGPT2APIConfig                 `json:"chatgpt2api,omitempty"`
+	Custom               CustomHTTPConfig                  `json:"custom,omitempty"`
 }
 
 // Metric 是以十进制字符串序列化的单项监控值。
 type Metric struct {
-	Key       MetricKey        `json:"key"`
-	Label     string           `json:"label"`
-	Value     decimal.Decimal  `json:"value"`
-	Unit      string           `json:"unit"`
-	Threshold *decimal.Decimal `json:"threshold,omitempty"`
+	Key        MetricKey           `json:"key"`
+	Label      string              `json:"label"`
+	Value      decimal.Decimal     `json:"value"`
+	Unit       string              `json:"unit"`
+	Threshold  *decimal.Decimal    `json:"threshold,omitempty"`
+	Comparison ThresholdComparison `json:"comparison,omitempty"`
 }
 
-// AccountStatus 是 chatgpt2api 账号明细的严格白名单视图。
+// AccountStatus 是号池账号明细的严格白名单视图。
 type AccountStatus struct {
-	Email         string          `json:"email,omitempty"`
-	Type          string          `json:"type,omitempty"`
-	Status        string          `json:"status"`
-	Quota         decimal.Decimal `json:"quota"`
-	RestoreAt     string          `json:"restore_at,omitempty"`
-	Success       int64           `json:"success"`
-	Fail          int64           `json:"fail"`
-	ImageInflight int64           `json:"image_inflight"`
+	ExternalID  string          `json:"-"`
+	DisplayName string          `json:"display_name,omitempty"`
+	Provider    string          `json:"provider,omitempty"`
+	Email       string          `json:"email,omitempty"`
+	Type        string          `json:"type,omitempty"`
+	Status      string          `json:"status"`
+	StatusText  string          `json:"status_text,omitempty"`
+	Quota       decimal.Decimal `json:"quota"`
+	RecoveryAt  string          `json:"recovery_at,omitempty"`
+	// RestoreAt 只为兼容旧适配器和历史测试保留，新代码统一使用 RecoveryAt。
+	RestoreAt     string `json:"-"`
+	Success       int64  `json:"success"`
+	Fail          int64  `json:"fail"`
+	ImageInflight int64  `json:"image_inflight"`
 }
 
 // Snapshot 表示一次只读检测结果，不包含任何凭据或原始响应。
@@ -204,8 +221,28 @@ func metricWithThreshold(target TargetConfig, key MetricKey, label string, value
 	if threshold, ok := target.Thresholds[key]; ok {
 		copyValue := threshold
 		metric.Threshold = &copyValue
+		metric.Comparison = NormalizeThresholdComparison(target.ThresholdComparisons[key])
 	}
 	return metric
+}
+
+// NormalizeThresholdComparison 兼容旧配置，空值和未知值都按低于等于阈值处理。
+func NormalizeThresholdComparison(comparison ThresholdComparison) ThresholdComparison {
+	if comparison == ThresholdComparisonGTE {
+		return ThresholdComparisonGTE
+	}
+	return ThresholdComparisonLTE
+}
+
+// ThresholdBreached 判断指标是否已经按配置方向达到告警阈值。
+func ThresholdBreached(metric Metric) bool {
+	if metric.Threshold == nil {
+		return false
+	}
+	if NormalizeThresholdComparison(metric.Comparison) == ThresholdComparisonGTE {
+		return metric.Value.GreaterThanOrEqual(*metric.Threshold)
+	}
+	return metric.Value.LessThanOrEqual(*metric.Threshold)
 }
 
 func newSnapshot(target TargetConfig) Snapshot {

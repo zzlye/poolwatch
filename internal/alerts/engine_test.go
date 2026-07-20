@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,7 +183,7 @@ func TestMaskEmailRejectsNonStandardAddress(t *testing.T) {
 }
 
 func TestChatPoolRemovesSensitiveMetadata(t *testing.T) {
-	accounts := sanitizedAccounts("target_test", []monitor.AccountStatus{{
+	accounts := sanitizedAccounts(string(monitor.TargetKindChatGPT2API), "target_test", []monitor.AccountStatus{{
 		Email: "private@example.com", Type: "Bearer private-token", RestoreAt: "client_secret_value",
 	}}, time.Now().UTC())
 	if len(accounts) != 1 {
@@ -190,6 +191,85 @@ func TestChatPoolRemovesSensitiveMetadata(t *testing.T) {
 	}
 	if accounts[0].Type != "" || accounts[0].RestoreAt != "" {
 		t.Fatalf("疑似凭据的账号元数据不应被保存：%#v", accounts[0])
+	}
+}
+
+func TestGreaterThanThresholdAlertAndRecovery(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindCLIProxyAPI))
+	defer database.Close()
+	notifier := &recordingNotifier{}
+	engine := NewEngine(database, notifier)
+	now := time.Date(2026, 7, 20, 15, 0, 0, 0, time.UTC)
+	threshold := decimal.NewFromInt(1)
+	snapshot := monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindCLIProxyAPI, ObservedAt: now,
+		Metrics: []monitor.Metric{{
+			Key: monitor.MetricErrorAccounts, Label: "异常账号", Value: decimal.NewFromInt(1), Unit: "个",
+			Threshold: &threshold, Comparison: monitor.ThresholdComparisonGTE,
+		}},
+	}
+	if err := engine.HandleSuccess(context.Background(), target, snapshot); err != nil {
+		t.Fatalf("处理异常账号阈值失败: %v", err)
+	}
+	if len(notifier.items) != 1 || notifier.items[0].Title != "异常账号过高" {
+		t.Fatalf("高于等于阈值应发送过高告警：%#v", notifier.items)
+	}
+	latest, err := database.LatestSnapshot(context.Background(), target.ID)
+	if err != nil || latest.Status != string(monitor.TargetStatusWarning) {
+		t.Fatalf("高向阈值快照状态不正确：%#v, %v", latest, err)
+	}
+
+	snapshot.ObservedAt = now.Add(time.Minute)
+	snapshot.Metrics[0].Value = decimal.Zero
+	if err := engine.HandleSuccess(context.Background(), target, snapshot); err != nil {
+		t.Fatalf("处理异常账号恢复失败: %v", err)
+	}
+	if len(notifier.items) != 2 || !notifier.items[1].Recovered || !strings.Contains(notifier.items[1].Message, "已经低于阈值") {
+		t.Fatalf("高向阈值恢复通知不正确：%#v", notifier.items)
+	}
+}
+
+func TestCLIProxyAccountsAreHashedAndSanitized(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindCLIProxyAPI))
+	defer database.Close()
+	engine := NewEngine(database, nil)
+	rawID := "upstream-account-secret-id"
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindCLIProxyAPI, ObservedAt: time.Now().UTC(),
+		Accounts: []monitor.AccountStatus{{
+			ExternalID: rawID, DisplayName: "主账号", Provider: "codex", Email: "private@example.com",
+			Type: "plus", Status: string(monitor.TargetStatusWarning), StatusText: "额度冷却中",
+			RecoveryAt: "2026-07-21T00:00:00Z", Success: 12, Fail: 3,
+		}},
+	}); err != nil {
+		t.Fatalf("保存 CLIProxyAPI 账号失败: %v", err)
+	}
+	accounts, err := database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("读取 CLIProxyAPI 账号失败：%#v, %v", accounts, err)
+	}
+	account := accounts[0]
+	if account.ExternalID == rawID || len(account.ExternalID) != 24 || account.Email == "private@example.com" {
+		t.Fatalf("账号标识或邮箱未脱敏：%#v", account)
+	}
+	if account.DisplayName != "主账号" || account.Provider != "codex" || account.StatusText != "额度冷却中" || account.Success != 12 || account.Fail != 3 {
+		t.Fatalf("安全账号字段保存不完整：%#v", account)
+	}
+}
+
+func TestCLIProxyAccountLabelMasksEmailAndDropsSecrets(t *testing.T) {
+	accounts := sanitizedAccounts(string(monitor.TargetKindCLIProxyAPI), "target_cli", []monitor.AccountStatus{
+		{ExternalID: "email-label", DisplayName: "user@example.com", Status: string(monitor.TargetStatusHealthy)},
+		{ExternalID: "secret-label", DisplayName: "sk-abcdefghijklmnopqrstuvwxyz0123456789", Status: string(monitor.TargetStatusHealthy)},
+	}, time.Now().UTC())
+	if len(accounts) != 2 {
+		t.Fatalf("CLIProxyAPI 安全账号应被保留：%#v", accounts)
+	}
+	if accounts[0].DisplayName != "us***@example.com" || accounts[0].DisplayName == "user@example.com" {
+		t.Fatalf("邮箱形式的账号名称未脱敏：%#v", accounts[0])
+	}
+	if accounts[1].DisplayName != "" {
+		t.Fatalf("疑似密钥的账号名称应清空：%#v", accounts[1])
 	}
 }
 

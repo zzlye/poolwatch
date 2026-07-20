@@ -405,6 +405,60 @@ func TestCapturedCredentialRejectsInjectedSecrets(t *testing.T) {
 	}
 }
 
+func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
+	testServer, database, vault := newAPITestServer(t)
+	defer testServer.Close()
+	defer database.Close()
+	client := testServer.Client()
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+	status, body := requestJSON(t, client, http.MethodPost, testServer.URL+"/api/setup", map[string]any{
+		"initializationToken": "setup-token", "username": "admin", "password": "long-password-123",
+	}, "")
+	if status != http.StatusCreated {
+		t.Fatalf("首次设置失败: %d %s", status, body)
+	}
+
+	draft := map[string]any{
+		"name": "CLIProxyAPI", "kind": "cliproxyapi", "baseUrl": "https://cli.example.com", "topupUrl": "",
+		"enabled": true, "checkIntervalMinutes": 5, "adminKey": "management-secret",
+		"thresholds": []map[string]string{
+			{"key": "healthy_accounts", "label": "可用账号", "value": "1", "unit": "个", "comparison": "lte"},
+			{"key": "error_accounts", "label": "异常账号", "value": "1", "unit": "个", "comparison": "gte"},
+		},
+	}
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets", draft, "")
+	if status != http.StatusCreated || strings.Contains(body, "management-secret") || !strings.Contains(body, `"comparison":"gte"`) {
+		t.Fatalf("创建 CLIProxyAPI 渠道失败或响应不安全: %d %s", status, body)
+	}
+	var created targetResponse
+	if err := json.Unmarshal([]byte(body), &created); err != nil || created.Kind != string(monitor.TargetKindCLIProxyAPI) || !created.AuthConfigured {
+		t.Fatalf("CLIProxyAPI 渠道响应不正确：%#v, %v", created, err)
+	}
+	stored, err := database.TargetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取 CLIProxyAPI 渠道失败: %v", err)
+	}
+	var config storedTargetConfig
+	if err := json.Unmarshal([]byte(stored.ConfigJSON), &config); err != nil ||
+		config.ThresholdComparisons[monitor.MetricErrorAccounts] != monitor.ThresholdComparisonGTE {
+		t.Fatalf("比较方向未正确保存：%s, %v", stored.ConfigJSON, err)
+	}
+	credentialJSON, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(credentialJSON), "management-secret") {
+		t.Fatalf("管理密钥未加密保存: %v", err)
+	}
+
+	draft["adminKey"] = ""
+	draft["thresholds"] = []map[string]string{{
+		"key": "error_accounts", "label": "异常账号", "value": "1", "unit": "个", "comparison": "invalid",
+	}}
+	status, _ = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets", draft, "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("无效比较方向应被拒绝: %d", status)
+	}
+}
+
 func TestSensitiveSampleKeyCoversCompositeAndCamelCase(t *testing.T) {
 	for _, key := range []string{
 		"client_secret", "refreshToken", "authorizationHeader", "x-api-key", "privateKeyPem",

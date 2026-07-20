@@ -91,9 +91,10 @@ func (s *Store) ReplaceChatAccounts(ctx context.Context, targetID string, accoun
 	}
 	for _, account := range accounts {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO chat_accounts(
-			target_id, external_id, email, type, status, quota, restore_at, success, fail, observed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, account.ExternalID, account.Email, account.Type,
-			account.Status, account.Quota, account.RestoreAt, account.Success, account.Fail, formatTime(account.ObservedAt)); err != nil {
+			target_id, external_id, display_name, provider, email, type, status, status_text, quota, restore_at, success, fail, observed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, account.ExternalID, account.DisplayName,
+			account.Provider, account.Email, account.Type, account.Status, account.StatusText, account.Quota,
+			account.RestoreAt, account.Success, account.Fail, formatTime(account.ObservedAt)); err != nil {
 			return fmt.Errorf("保存脱敏号池账号失败: %w", err)
 		}
 	}
@@ -102,8 +103,9 @@ func (s *Store) ReplaceChatAccounts(ctx context.Context, targetID string, accoun
 
 // ListChatAccounts 返回一个渠道的脱敏账号列表。
 func (s *Store) ListChatAccounts(ctx context.Context, targetID string) ([]ChatAccount, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT target_id, external_id, email, type, status, quota, restore_at, success, fail, observed_at
-		FROM chat_accounts WHERE target_id = ? ORDER BY status, email`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT target_id, external_id, display_name, provider, email, type, status,
+		status_text, quota, restore_at, success, fail, observed_at
+		FROM chat_accounts WHERE target_id = ? ORDER BY status, provider, display_name, email`, targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,8 +114,9 @@ func (s *Store) ListChatAccounts(ctx context.Context, targetID string) ([]ChatAc
 	for rows.Next() {
 		var account ChatAccount
 		var observedAt string
-		if err := rows.Scan(&account.TargetID, &account.ExternalID, &account.Email, &account.Type, &account.Status,
-			&account.Quota, &account.RestoreAt, &account.Success, &account.Fail, &observedAt); err != nil {
+		if err := rows.Scan(&account.TargetID, &account.ExternalID, &account.DisplayName, &account.Provider,
+			&account.Email, &account.Type, &account.Status, &account.StatusText, &account.Quota,
+			&account.RestoreAt, &account.Success, &account.Fail, &observedAt); err != nil {
 			return nil, err
 		}
 		account.ObservedAt = parseTime(observedAt)

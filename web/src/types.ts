@@ -1,9 +1,10 @@
-export type TargetKind = 'new_api' | 'sub2api' | 'chatgpt2api' | 'custom'
+export type TargetKind = 'new_api' | 'sub2api' | 'chatgpt2api' | 'cliproxyapi' | 'custom'
 
 export type MetricKey =
   | 'wallet_balance'
   | 'subscription_balance'
   | 'image_quota'
+  | 'account_total'
   | 'healthy_accounts'
   | 'limited_accounts'
   | 'error_accounts'
@@ -17,12 +18,15 @@ export type ThemePreference = 'system' | 'light' | 'dark'
 
 export type CredentialMode = 'password' | 'access_token' | 'browser_session' | 'browser_oauth'
 
+export type ThresholdComparison = 'lte' | 'gte'
+
 export interface MetricValue {
   key: MetricKey
   label: string
   value: string
   unit: string
   threshold?: string
+  comparison?: ThresholdComparison
   status: TargetStatus
 }
 
@@ -37,11 +41,16 @@ export interface Snapshot {
 
 export interface SanitizedAccount {
   id: string
-  email: string
-  type: string
+  displayName?: string
+  email?: string
+  provider?: string
+  type?: string
   status: TargetStatus
-  imageQuota: string
+  statusText?: string
+  imageQuota?: string
   recoveryAt?: string
+  success?: number
+  fail?: number
 }
 
 export interface Target {
@@ -74,6 +83,7 @@ export interface ThresholdDraft {
   label: string
   value: string
   unit: string
+  comparison: ThresholdComparison
 }
 
 export interface TargetDraft {
@@ -197,6 +207,7 @@ export const targetKindLabels: Record<TargetKind, string> = {
   new_api: 'New API',
   sub2api: 'Sub2API',
   chatgpt2api: 'chatgpt2api',
+  cliproxyapi: 'CLIProxyAPI',
   custom: '自定义 HTTP'
 }
 
@@ -204,6 +215,7 @@ export const metricLabels: Record<MetricKey, string> = {
   wallet_balance: '钱包余额',
   subscription_balance: '订阅额度',
   image_quota: '图片额度',
+  account_total: '账号总数',
   healthy_accounts: '正常账号',
   limited_accounts: '限流账号',
   error_accounts: '异常账号',

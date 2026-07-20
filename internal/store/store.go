@@ -142,9 +142,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS chat_accounts (
 			target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
 			external_id TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL DEFAULT '',
 			type TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
+			status_text TEXT NOT NULL DEFAULT '',
 			quota INTEGER NOT NULL DEFAULT 0,
 			restore_at TEXT NOT NULL DEFAULT '',
 			success INTEGER NOT NULL DEFAULT 0,
@@ -167,6 +170,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "push_subscriptions", "user_agent", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "display_name", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "provider", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "status_text", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "chat_accounts", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	return nil
 }

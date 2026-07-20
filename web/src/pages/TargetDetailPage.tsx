@@ -4,11 +4,27 @@ import { ArrowLeft, CheckCircle2, Clock3, Edit3, ExternalLink, LoaderCircle, Ref
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { AccountPoolView } from '../components/AccountPoolView'
+import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
 import { formatDateTime, formatMetric, formatRelativeTime } from '../lib/format'
-import { metricLabels, targetKindLabels, type MetricKey } from '../types'
+import { metricLabels, targetKindLabels, type MetricKey, type MetricValue, type ThresholdComparison } from '../types'
+
+function thresholdComparison(metric?: MetricValue): ThresholdComparison {
+  // 历史渠道没有保存比较方向时，保持旧版“小于等于”判断。
+  return metric?.comparison ?? 'lte'
+}
+
+function thresholdSymbol(comparison: ThresholdComparison): string {
+  return comparison === 'gte' ? '≥' : '≤'
+}
+
+function historyThresholdText(value: string, threshold: string, comparison: ThresholdComparison): string {
+  const reached = comparison === 'gte' ? Number(value) >= Number(threshold) : Number(value) <= Number(threshold)
+  if (reached) return '达到告警条件'
+  return comparison === 'gte' ? '低于阈值' : '高于阈值'
+}
 
 export default function TargetDetailPage() {
   const { id = '' } = useParams()
@@ -84,7 +100,7 @@ export default function TargetDetailPage() {
             <button key={metric.key} type="button" className={selectedMetric === metric.key ? 'metric-card selected' : 'metric-card'} onClick={() => setSelectedMetric(metric.key)} aria-pressed={selectedMetric === metric.key}>
               <span><strong>{metric.label}</strong><StatusPill status={metric.status} /></span>
               <b>{formatMetric(metric.value, metric.unit)}</b>
-              <small>{metric.threshold ? `告警阈值 ≤ ${metric.threshold} ${metric.unit}` : '仅记录状态，不设置额度告警'}</small>
+              <small>{metric.threshold !== undefined ? `告警条件 ${thresholdSymbol(thresholdComparison(metric))} ${metric.threshold} ${metric.unit}` : '仅记录状态，不设置额度告警'}</small>
             </button>
           ))}
         </div>
@@ -94,8 +110,8 @@ export default function TargetDetailPage() {
         <div className="section-heading"><div><h2 id="history-title">历史趋势</h2><p>{selectedDefinition ? `${selectedDefinition.label} · ${selectedDefinition.unit}` : '选择一个指标查看趋势'}</p></div>{target.metrics.length > 1 ? <label className="compact-field"><span>指标</span><select value={selectedMetric} onChange={(event) => setSelectedMetric(event.target.value as MetricKey)}>{target.metrics.map((metric) => <option key={metric.key} value={metric.key}>{metric.label}</option>)}</select></label> : null}</div>
         {historyQuery.isPending ? <LoadingView label="正在读取历史" /> : historyQuery.isError ? <ErrorView message={historyQuery.error.message} onRetry={() => void historyQuery.refetch()} /> : historyQuery.data ? (
           <>
-            <LineChart snapshots={historyQuery.data.snapshots} threshold={selectedDefinition?.threshold} label={selectedDefinition?.label ?? metricLabels[selectedMetric as MetricKey]} unit={selectedDefinition?.unit ?? ''} />
-            <details className="history-details"><summary>查看同数据表格</summary><div className="table-wrap"><table><thead><tr><th scope="col">检测时间</th><th scope="col">数值</th><th scope="col">与阈值关系</th></tr></thead><tbody>{historyQuery.data.snapshots.slice().reverse().map((snapshot) => <tr key={snapshot.id}><td>{formatDateTime(snapshot.measuredAt)}</td><td>{formatMetric(snapshot.value, snapshot.unit)}</td><td>{selectedDefinition?.threshold ? Number(snapshot.value) <= Number(selectedDefinition.threshold) ? '达到告警条件' : '高于阈值' : '未设阈值'}</td></tr>)}</tbody></table></div></details>
+            <LineChart snapshots={historyQuery.data.snapshots} threshold={selectedDefinition?.threshold} comparison={thresholdComparison(selectedDefinition)} label={selectedDefinition?.label ?? metricLabels[selectedMetric as MetricKey]} unit={selectedDefinition?.unit ?? ''} />
+            <details className="history-details"><summary>查看同数据表格</summary><div className="table-wrap"><table><thead><tr><th scope="col">检测时间</th><th scope="col">数值</th><th scope="col">与阈值关系</th></tr></thead><tbody>{historyQuery.data.snapshots.slice().reverse().map((snapshot) => <tr key={snapshot.id}><td>{formatDateTime(snapshot.measuredAt)}</td><td>{formatMetric(snapshot.value, snapshot.unit)}</td><td>{selectedDefinition?.threshold !== undefined ? historyThresholdText(snapshot.value, selectedDefinition.threshold, thresholdComparison(selectedDefinition)) : '未设阈值'}</td></tr>)}</tbody></table></div></details>
           </>
         ) : null}
       </section>
@@ -104,6 +120,13 @@ export default function TargetDetailPage() {
         <section className="content-section" aria-labelledby="account-title">
           <div className="section-heading"><div><h2 id="account-title">号池账号状态</h2><p>仅显示脱敏邮箱、类型、状态、额度与恢复时间。</p></div></div>
           {target.accounts?.length ? <AccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="配置管理员密钥后才能读取只读脱敏明细。" />}
+        </section>
+      ) : null}
+
+      {target.kind === 'cliproxyapi' ? (
+        <section className="content-section" aria-labelledby="cliproxy-account-title">
+          <div className="section-heading"><div><h2 id="cliproxy-account-title">CLIProxyAPI 账号状态</h2><p>只读显示账号、提供商、类型、状态、调用统计与恢复时间。</p></div></div>
+          {target.accounts?.length ? <CLIProxyAccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
         </section>
       ) : null}
 

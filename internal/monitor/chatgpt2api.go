@@ -101,12 +101,14 @@ func (adapter *chatGPT2APIAdapter) readAccounts(ctx context.Context, session *re
 			quota = decimal.Zero
 		}
 		// 这里只复制明确允许的展示字段，原始账号对象和任何 Token 都不会离开当前函数。
+		recoveryAt := safeChatAccountField(raw, "restore_at", "recover_at", "reset_at")
 		result = append(result, AccountStatus{
 			Email:         safeChatAccountField(raw, "email"),
 			Type:          safeChatAccountField(raw, "type", "plan_type"),
 			Status:        safeChatAccountField(raw, "status"),
 			Quota:         quota,
-			RestoreAt:     safeChatAccountField(raw, "restore_at", "recover_at", "reset_at"),
+			RecoveryAt:    recoveryAt,
+			RestoreAt:     recoveryAt,
 			Success:       int64Field(raw, "success"),
 			Fail:          int64Field(raw, "fail"),
 			ImageInflight: int64Field(raw, "image_inflight"),

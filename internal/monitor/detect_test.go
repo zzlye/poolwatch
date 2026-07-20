@@ -9,6 +9,57 @@ import (
 	"testing"
 )
 
+func TestDetect优先通过公共根端点识别CLIProxyAPI(t *testing.T) {
+	var healthRequests atomic.Int32
+	var managementRequests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		writeTestJSON(writer, map[string]any{
+			"message":   "CLI Proxy API Server",
+			"endpoints": []string{"POST /v1/chat/completions", "POST /v1/completions", "GET /v1/models"},
+		})
+	})
+	mux.HandleFunc("/health", func(writer http.ResponseWriter, request *http.Request) {
+		healthRequests.Add(1)
+		writeTestJSON(writer, map[string]any{"accounts": map[string]any{"active": 1, "total_quota": 1}})
+	})
+	mux.HandleFunc("/v0/management/auth-files", func(writer http.ResponseWriter, request *http.Request) {
+		managementRequests.Add(1)
+		writer.WriteHeader(http.StatusUnauthorized)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	kind, err := NewRegistry(HTTPOptions{}).Detect(context.Background(), server.URL, true)
+	if err != nil || kind != TargetKindCLIProxyAPI {
+		t.Fatalf("应优先识别 CLIProxyAPI，kind=%s err=%v", kind, err)
+	}
+	if healthRequests.Load() != 0 {
+		t.Fatalf("命中 CLIProxyAPI 根端点后不应继续探测：%d", healthRequests.Load())
+	}
+	if managementRequests.Load() != 0 {
+		t.Fatalf("自动识别不应请求受保护管理端点：%d", managementRequests.Load())
+	}
+}
+
+func TestDetect不会把普通JSON识别为CLIProxyAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/" {
+			writeTestJSON(writer, map[string]any{
+				"message": "普通代理服务", "endpoints": []string{"POST /v1/chat/completions", "GET /v1/models"},
+			})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+
+	kind, err := NewRegistry(HTTPOptions{}).Detect(context.Background(), server.URL, true)
+	if err == nil || kind != "" {
+		t.Fatalf("普通 JSON 不应识别为 CLIProxyAPI，kind=%s err=%v", kind, err)
+	}
+}
+
 func TestDetect优先识别ChatGPT2API(t *testing.T) {
 	var statusRequests atomic.Int32
 	mux := http.NewServeMux()

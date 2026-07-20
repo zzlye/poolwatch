@@ -13,14 +13,20 @@ const newAPISubscriptionThreshold: ThresholdDraft = {
   key: 'subscription_balance',
   label: '订阅余额',
   value: '20',
-  unit: '站点单位'
+  unit: '站点单位',
+  comparison: 'lte'
 }
 
 const thresholdsByKind: Record<TargetKind, ThresholdDraft[]> = {
-  new_api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位' }],
-  sub2api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: 'USD' }],
-  chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次' }],
-  custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个' }]
+  new_api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位', comparison: 'lte' }],
+  sub2api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: 'USD', comparison: 'lte' }],
+  chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次', comparison: 'lte' }],
+  cliproxyapi: [
+    { key: 'healthy_accounts', label: '可用账号', value: '0', unit: '个', comparison: 'lte' },
+    { key: 'limited_accounts', label: '限流账号', value: '1', unit: '个', comparison: 'gte' },
+    { key: 'error_accounts', label: '异常账号', value: '1', unit: '个', comparison: 'gte' }
+  ],
+  custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个', comparison: 'lte' }]
 }
 
 function defaultCredentialMode(kind: TargetKind): CredentialMode {
@@ -76,7 +82,14 @@ export function targetToDraft(target: Target): TargetDraft {
     statusPointer: target.statusPointer ?? draft.statusPointer,
     // 自定义请求头可能包含秘密，接口只返回是否已配置；编辑时留空表示沿用原值。
     customHeaders: target.customHeadersConfigured ? '' : draft.customHeaders,
-    thresholds: target.metrics.filter((item) => item.threshold !== undefined).map((item) => ({ key: item.key, label: item.label, value: item.threshold ?? '', unit: item.unit }))
+    thresholds: target.metrics.filter((item) => item.threshold !== undefined).map((item) => ({
+      key: item.key,
+      label: item.label,
+      value: item.threshold ?? '',
+      unit: item.unit,
+      // 旧版本数据没有比较方向，沿用原有的“小于等于”语义。
+      comparison: item.comparison ?? 'lte'
+    }))
   }
 }
 
@@ -338,11 +351,12 @@ function AuthenticationFields({
     )
   }
 
-  if (draft.kind === 'chatgpt2api') {
+  if (draft.kind === 'chatgpt2api' || draft.kind === 'cliproxyapi') {
+    const isCLIProxyAPI = draft.kind === 'cliproxyapi'
     return (
       <>
-        <SecretField label="管理员密钥" value={draft.adminKey} show={showSecret} editing={editing} onChange={(adminKey) => update({ adminKey })} onToggle={() => setShowSecret((value) => !value)} optional />
-        <div className="inline-message tone-info span-2">管理员密钥仅用于读取脱敏账号明细；不执行刷新、重登、导入或删除。</div>
+        <SecretField label={isCLIProxyAPI ? '管理密钥' : '管理员密钥'} value={draft.adminKey} show={showSecret} editing={editing} onChange={(adminKey) => update({ adminKey })} onToggle={() => setShowSecret((value) => !value)} optional={!isCLIProxyAPI} />
+        <div className="inline-message tone-info span-2">{isCLIProxyAPI ? '管理密钥仅用于只读查询账号状态与统计，不会启停、重置或删除账号。' : '管理员密钥仅用于读取脱敏账号明细；不执行刷新、重登、导入或删除。'}</div>
       </>
     )
   }
@@ -497,6 +511,9 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
         return setError('自定义请求头必须是有效的 JSON 对象。'), false
       }
     }
+    if (step === 1 && draft.kind === 'cliproxyapi' && !draft.adminKey.trim() && !(editing && existing?.authConfigured)) {
+      return setError('请填写 CLIProxyAPI 管理密钥。'), false
+    }
     if (step === 2) {
       if (!draft.thresholds.length || draft.thresholds.some((item) => !item.value || !Number.isFinite(Number(item.value)))) return setError('每个指标都需要填写有效阈值。'), false
       if (draft.kind === 'custom' && !draft.jsonPointer.startsWith('/')) return setError('指标字段必须使用以 / 开头的 JSON Pointer。'), false
@@ -541,7 +558,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
         </> : null}
 
         {step === 2 ? <>
-          <div className="panel-heading"><h2 id="step-title-2">指标与阈值</h2><p>不同单位分别判断，钱包、订阅额度和图片次数不会相加。</p></div>
+          <div className="panel-heading"><h2 id="step-title-2">指标与阈值</h2><p>每个指标按自己的比较方向独立判断，不同单位不会相加。</p></div>
           {draft.kind === 'custom' ? (
             <div className="form-grid custom-map-fields">
               <label className="field"><span>请求方法</span><select value={draft.requestMethod} onChange={(event) => update({ requestMethod: event.target.value as 'GET' | 'POST', confirmPost: false })}><option value="GET">GET</option><option value="POST">POST</option></select></label>
@@ -563,7 +580,8 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
             ) : null}
             {draft.thresholds.map((threshold, index) => (
               <div className="threshold-row" key={`${threshold.key}-${index}`}>
-                {draft.kind === 'custom' ? <label className="field"><span>指标名称</span><input value={threshold.label} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item) })} /></label> : <div className="threshold-label"><span>{metricLabels[threshold.key]}</span><small>{threshold.key}</small></div>}
+                {draft.kind === 'custom' ? <label className="field"><span>指标名称</span><input value={threshold.label} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item) })} /></label> : <div className="threshold-label"><span>{threshold.label || metricLabels[threshold.key]}</span><small>{threshold.key}</small></div>}
+                <label className="field"><span>告警条件</span><select value={threshold.comparison} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: event.target.value as ThresholdDraft['comparison'] } : item) })}><option value="lte">小于或等于（≤）</option><option value="gte">大于或等于（≥）</option></select></label>
                 <label className="field"><span>告警阈值</span><input type="number" min="0" step="any" value={threshold.value} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item) })} inputMode="decimal" /></label>
                 <label className="field"><span>单位</span><input value={threshold.unit} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value } : item) })} readOnly={draft.kind !== 'custom'} /></label>
               </div>

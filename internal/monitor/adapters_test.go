@@ -425,6 +425,91 @@ func TestChatGPT2API聚合并严格脱敏(t *testing.T) {
 	}
 }
 
+func TestCLIProxyAPI只读聚合并严格白名单(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v0/management/auth-files" ||
+			request.Header.Get("Authorization") != "Bearer management-secret" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"files": []any{
+			map[string]any{
+				"auth_index": "stable-auth-index", "id": "raw-active-id", "label": "主账号", "provider": "codex", "email": "active@example.com",
+				"account_type": "plus", "status": "active", "success": 12, "failed": 1,
+				"account": "ignored-account", "path": "ignored-path", "name": "ignored-name", "id_token": "ignored-token",
+			},
+			map[string]any{
+				"id": "raw-limited-id", "provider": "claude", "account_type": "api_key", "status": "active", "unavailable": true,
+				"next_retry_after": "2099-07-20T00:00:00Z", "status_message": "Bearer raw-status-secret",
+			},
+			map[string]any{"id": "raw-error-id", "provider": "gemini", "status": "error"},
+			map[string]any{"id": "raw-disabled-id", "provider": "qwen", "status": "active", "disabled": true},
+			map[string]any{"id": "raw-pending-id", "provider": "kimi", "status": "pending"},
+			map[string]any{"id": "raw-unknown-id", "provider": "custom", "status": "mystery"},
+		}})
+	}))
+	defer server.Close()
+
+	healthyThreshold := decimal.NewFromInt(1)
+	errorThreshold := decimal.NewFromInt(1)
+	snapshot, err := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{})).Check(context.Background(), TargetConfig{
+		ID: "cli-1", BaseURL: server.URL, AllowPrivateNetwork: true,
+		Credential: Credential{AdminKey: "management-secret"},
+		Thresholds: map[MetricKey]decimal.Decimal{
+			MetricHealthyAccounts: healthyThreshold,
+			MetricErrorAccounts:   errorThreshold,
+		},
+		ThresholdComparisons: map[MetricKey]ThresholdComparison{
+			MetricHealthyAccounts: ThresholdComparisonLTE,
+			MetricErrorAccounts:   ThresholdComparisonGTE,
+		},
+	})
+	if err != nil {
+		t.Fatalf("检测 CLIProxyAPI 失败：%v", err)
+	}
+	assertMetric(t, snapshot, MetricAccountTotal, "6", "个")
+	assertMetric(t, snapshot, MetricHealthyAccounts, "1", "个")
+	assertMetric(t, snapshot, MetricLimitedAccounts, "2", "个")
+	assertMetric(t, snapshot, MetricErrorAccounts, "2", "个")
+	assertMetric(t, snapshot, MetricDisabledAccounts, "1", "个")
+	if len(snapshot.Accounts) != 6 || snapshot.Accounts[0].DisplayName != "主账号" || snapshot.Accounts[0].Type != "plus" {
+		t.Fatalf("CLIProxyAPI 账号白名单字段不正确：%+v", snapshot.Accounts)
+	}
+	if snapshot.Accounts[0].ExternalID != "stable-auth-index" {
+		t.Fatalf("账号标识应优先使用 auth_index：%+v", snapshot.Accounts[0])
+	}
+	if snapshot.Accounts[1].Status != string(TargetStatusWarning) || snapshot.Accounts[1].RecoveryAt != "2099-07-20T00:00:00Z" ||
+		snapshot.Accounts[1].Type != "api_key" || snapshot.Accounts[1].StatusText != "限流或冷却中" {
+		t.Fatalf("限流账号分类或恢复时间不正确：%+v", snapshot.Accounts[1])
+	}
+	if snapshot.Accounts[2].Status != string(TargetStatusError) || snapshot.Accounts[3].Status != string(TargetStatusDisabled) ||
+		snapshot.Accounts[4].Status != string(TargetStatusWarning) || snapshot.Accounts[5].Status != string(TargetStatusUnknown) {
+		t.Fatalf("CLIProxyAPI 状态分类不正确：%+v", snapshot.Accounts)
+	}
+	serialized, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("序列化 CLIProxyAPI 快照失败：%v", err)
+	}
+	for _, forbidden := range []string{"stable-auth-index", "raw-active-id", "ignored-account", "ignored-path", "ignored-name", "ignored-token", "raw-status-secret", "management-secret"} {
+		if strings.Contains(string(serialized), forbidden) {
+			t.Fatalf("CLIProxyAPI 快照包含未允许字段 %q：%s", forbidden, serialized)
+		}
+	}
+	for _, metric := range snapshot.Metrics {
+		if metric.Key == MetricErrorAccounts && metric.Comparison != ThresholdComparisonGTE {
+			t.Fatalf("异常账号指标比较方向不正确：%+v", metric)
+		}
+	}
+}
+
+func TestCLIProxyAPI要求管理密钥(t *testing.T) {
+	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	_, err := adapter.Check(context.Background(), TargetConfig{BaseURL: "https://example.com"})
+	if err == nil || ErrorClassOf(err) != ErrorClassConfig {
+		t.Fatalf("缺少管理密钥应返回配置错误：%v", err)
+	}
+}
+
 func TestCustomHTTP支持四种认证方式(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -550,7 +635,7 @@ func TestRegistryProbe字段映射无效仍返回Sample(t *testing.T) {
 
 func TestRegistry按渠道类型分派(t *testing.T) {
 	registry := NewRegistry(HTTPOptions{})
-	for _, kind := range []TargetKind{TargetKindNewAPI, TargetKindSub2API, TargetKindChatGPT2API, TargetKindCustom} {
+	for _, kind := range []TargetKind{TargetKindNewAPI, TargetKindSub2API, TargetKindChatGPT2API, TargetKindCLIProxyAPI, TargetKindCustom} {
 		adapter, err := registry.Adapter(kind)
 		if err != nil || adapter.Kind() != kind {
 			t.Fatalf("注册器缺少 %s 适配器：%v", kind, err)
