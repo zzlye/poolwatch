@@ -90,6 +90,8 @@ import androidx.core.net.toUri
 import com.zzlye.poolwatch.config.AppSettings
 import com.zzlye.poolwatch.config.MonitorStatus
 import com.zzlye.poolwatch.config.ServerUrlValidator
+import com.zzlye.poolwatch.auth.ChannelAuthActivity
+import com.zzlye.poolwatch.auth.ChannelAuthSecurity
 import com.zzlye.poolwatch.monitoring.MonitoringScheduler
 import com.zzlye.poolwatch.monitoring.NotificationHelper
 import com.zzlye.poolwatch.monitoring.RealtimeMonitorService
@@ -517,6 +519,14 @@ private fun PoolWatchWebView(
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                             val uri = request.url
+                            val attemptId = ChannelAuthSecurity.attemptIdFromLaunchUrl(uri.toString())
+                            val currentUrl = view.url.orEmpty()
+                            if (request.isForMainFrame && request.hasGesture() && attemptId != null &&
+                                ChannelAuthSecurity.sameOrigin(currentUrl, serverUrl)
+                            ) {
+                                context.startActivity(ChannelAuthActivity.createIntent(context, attemptId, serverUrl))
+                                return true
+                            }
                             return if (sameOrigin(uri, serverUrl.toUri())) {
                                 false
                             } else {

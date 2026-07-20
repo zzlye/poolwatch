@@ -73,6 +73,30 @@ func (adapter *sub2APIAdapter) Check(ctx context.Context, target TargetConfig) (
 	return snapshot, nil
 }
 
+// VerifyBrowserCredential 校验网页登录返回的令牌，并保留服务端轮换后的最新令牌。
+func (adapter *sub2APIAdapter) VerifyBrowserCredential(ctx context.Context, target TargetConfig) (Credential, error) {
+	target = ensureTargetKind(target, adapter.Kind())
+	if strings.TrimSpace(target.Credential.AccessToken) == "" && strings.TrimSpace(target.Credential.RefreshToken) == "" {
+		return Credential{}, checkError(ErrorClassConfig, "校验 Sub2API 网页登录", "网页登录返回的访问令牌和刷新令牌均为空", 0, nil)
+	}
+	session := adapter.http.newSession(target.AllowPrivateNetwork)
+	token, err := adapter.resolveToken(ctx, session, target)
+	if err != nil {
+		return Credential{}, err
+	}
+	_, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
+	if err != nil && IsAuthFailure(err) && token.refreshToken != "" {
+		token, err = adapter.refresh(ctx, session, target, token.refreshToken)
+		if err == nil {
+			_, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
+		}
+	}
+	if err != nil {
+		return Credential{}, err
+	}
+	return Credential{AccessToken: token.accessToken, RefreshToken: token.refreshToken}, nil
+}
+
 func (adapter *sub2APIAdapter) resolveToken(ctx context.Context, session *requestSession, target TargetConfig) (sub2APIToken, error) {
 	cacheKey := sub2APICacheKey(target)
 	adapter.mu.Lock()
@@ -99,7 +123,7 @@ func (adapter *sub2APIAdapter) resolveToken(ctx context.Context, session *reques
 func (adapter *sub2APIAdapter) login(ctx context.Context, session *requestSession, target TargetConfig) (sub2APIToken, error) {
 	credential := target.Credential
 	if strings.TrimSpace(credential.Email) == "" || credential.Password == "" {
-		return sub2APIToken{}, checkError(ErrorClassConfig, "配置 Sub2API 认证", "请填写访问令牌、刷新令牌或邮箱密码", 0, nil)
+		return sub2APIToken{}, checkError(ErrorClassConfig, "配置 Sub2API 认证", "请使用网页登录，或填写访问令牌、刷新令牌或邮箱密码", 0, nil)
 	}
 	endpoint, err := joinTargetURL(target.BaseURL, "/api/v1/auth/login")
 	if err != nil {
@@ -241,3 +265,4 @@ func sub2APIUserEnabled(user map[string]any) bool {
 }
 
 var _ Adapter = (*sub2APIAdapter)(nil)
+var _ BrowserCredentialVerifier = (*sub2APIAdapter)(nil)

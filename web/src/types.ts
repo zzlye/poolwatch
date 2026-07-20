@@ -15,6 +15,8 @@ export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 
+export type CredentialMode = 'password' | 'access_token' | 'browser_session' | 'browser_oauth'
+
 export interface MetricValue {
   key: MetricKey
   label: string
@@ -56,6 +58,7 @@ export interface Target {
   nextCheckAt?: string
   lastError?: string
   authConfigured: boolean
+  credentialMode?: CredentialMode
   authType?: 'none' | 'bearer' | 'basic' | 'headers'
   requestMethod?: 'GET' | 'POST'
   confirmPost?: boolean
@@ -89,6 +92,9 @@ export interface TargetDraft {
   refreshToken: string
   adminKey: string
   userId: string
+  credentialMode: CredentialMode
+  cookie: string
+  browserAuthAttemptId: string
   authType: 'none' | 'bearer' | 'basic' | 'headers'
   requestMethod: 'GET' | 'POST'
   confirmPost: boolean
@@ -171,6 +177,15 @@ export interface TestConnectionResult {
 export interface DetectTargetResult {
   kind: TargetKind
   message: string
+}
+
+export interface TargetAuthAttempt {
+  id: string
+  status: 'waiting' | 'ready' | 'expired' | 'cancelled'
+  loginUrl: string
+  expiresAt: string
+  userId?: string
+  message?: string
 }
 
 export interface HistoryResult {

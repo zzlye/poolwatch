@@ -52,6 +52,23 @@ func (apiTestRunner) Detect(_ context.Context, _ string, _ bool) (monitor.Target
 	return monitor.TargetKindNewAPI, nil
 }
 
+func (apiTestRunner) VerifyBrowserCredential(_ context.Context, target monitor.TargetInput) (monitor.Credential, error) {
+	switch target.Kind {
+	case monitor.TargetKindNewAPI:
+		if target.Credential.Cookie != "session=oauth-cookie" {
+			return monitor.Credential{}, errors.New("网页登录会话无效")
+		}
+		return monitor.Credential{Cookie: target.Credential.Cookie, UserID: "42"}, nil
+	case monitor.TargetKindSub2API:
+		if target.Credential.AccessToken != "oauth-access" {
+			return monitor.Credential{}, errors.New("网页登录令牌无效")
+		}
+		return target.Credential, nil
+	default:
+		return monitor.Credential{}, errors.New("渠道不支持网页登录")
+	}
+}
+
 func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	testServer, database, vault := newAPITestServer(t)
 	defer testServer.Close()
@@ -297,6 +314,97 @@ func TestProtectedAPIRejectsAnonymousRequest(t *testing.T) {
 	}
 }
 
+func TestTargetAuthAttemptCaptureAndConsume(t *testing.T) {
+	testServer, database, vault := newAPITestServerWithPrivateTargets(t, true)
+	defer testServer.Close()
+	defer database.Close()
+	client := testServer.Client()
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+
+	status, body := requestJSON(t, client, http.MethodPost, testServer.URL+"/api/setup", map[string]any{
+		"initializationToken": "setup-token", "username": "admin", "password": "long-password-123",
+	}, "")
+	if status != http.StatusCreated {
+		t.Fatalf("首次设置失败: %d %s", status, body)
+	}
+	baseURL := "http://127.0.0.1:18080"
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/target-auth/attempts", map[string]any{
+		"kind": "new_api", "baseUrl": baseURL,
+	}, "")
+	if status != http.StatusCreated || strings.Contains(body, "captureToken") || strings.Contains(body, "oauth-cookie") {
+		t.Fatalf("创建网页登录任务失败或泄漏秘密: %d %s", status, body)
+	}
+	var attempt targetAuthAttemptResponse
+	if err := json.Unmarshal([]byte(body), &attempt); err != nil || !strings.HasPrefix(attempt.ID, "auth_") || attempt.Status != "waiting" {
+		t.Fatalf("网页登录任务响应无效: %#v, %v", attempt, err)
+	}
+
+	status, body = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/target-auth/native/"+attempt.ID, nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("读取原生网页登录票据失败: %d %s", status, body)
+	}
+	var native nativeTargetAuthAttemptResponse
+	if err := json.Unmarshal([]byte(body), &native); err != nil || native.CaptureToken == "" || native.BaseURL != baseURL {
+		t.Fatalf("原生网页登录票据无效: %#v, %v", native, err)
+	}
+	status, _ = requestJSONWithHeaders(t, client, http.MethodPost, testServer.URL+"/api/target-auth/native/"+attempt.ID+"/capture", map[string]any{
+		"cookie": "session=oauth-cookie",
+	}, "", map[string]string{"X-Target-Auth-Token": "wrong-token"})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("错误捕获票据应被拒绝: %d", status)
+	}
+	status, body = requestJSONWithHeaders(t, client, http.MethodPost, testServer.URL+"/api/target-auth/native/"+attempt.ID+"/capture", map[string]any{
+		"cookie": "session=oauth-cookie",
+	}, "", map[string]string{"X-Target-Auth-Token": native.CaptureToken})
+	if status != http.StatusOK || strings.Contains(body, "oauth-cookie") || strings.Contains(body, native.CaptureToken) {
+		t.Fatalf("捕获网页登录会话失败或响应泄漏秘密: %d %s", status, body)
+	}
+	var ready targetAuthAttemptResponse
+	if err := json.Unmarshal([]byte(body), &ready); err != nil || ready.Status != "ready" || ready.UserID != "42" {
+		t.Fatalf("网页登录完成状态无效: %#v, %v", ready, err)
+	}
+
+	createBody := map[string]any{
+		"name": "OAuth 主站", "kind": "new_api", "baseUrl": baseURL, "topupUrl": "",
+		"enabled": true, "checkIntervalMinutes": 5, "username": "", "email": "", "password": "",
+		"totpCode": "", "totpSecret": "", "accessToken": "", "refreshToken": "", "adminKey": "", "userId": "",
+		"credentialMode": "browser_session", "cookie": "", "browserAuthAttemptId": attempt.ID,
+		"authType": "bearer", "requestMethod": "GET", "confirmPost": false, "customHeaders": "{}",
+		"jsonPointer": "/data/balance", "statusPointer": "",
+		"thresholds": []map[string]string{{"key": "wallet_balance", "label": "钱包余额", "value": "10", "unit": "元"}},
+	}
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets", createBody, "")
+	if status != http.StatusCreated || strings.Contains(body, "oauth-cookie") || !strings.Contains(body, `"credentialMode":"browser_session"`) {
+		t.Fatalf("使用网页登录任务创建渠道失败: %d %s", status, body)
+	}
+	var created targetResponse
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatalf("解析渠道响应失败: %v", err)
+	}
+	stored, err := database.TargetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取网页登录渠道失败: %v", err)
+	}
+	decoded, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(decoded), "oauth-cookie") || !strings.Contains(string(decoded), `"user_id":"42"`) {
+		t.Fatalf("网页登录凭据未正确加密保存: %s, %v", decoded, err)
+	}
+	status, _ = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/target-auth/attempts/"+attempt.ID, nil, "")
+	if status != http.StatusNotFound {
+		t.Fatalf("保存渠道后网页登录任务应被消费: %d", status)
+	}
+}
+
+func TestCapturedCredentialRejectsInjectedSecrets(t *testing.T) {
+	if _, err := capturedCredential(monitor.TargetKindNewAPI, targetAuthCaptureRequest{Cookie: "session=ok\r\nX-Test: injected"}); err == nil {
+		t.Fatal("含换行的 Cookie 应被拒绝")
+	}
+	if _, err := capturedCredential(monitor.TargetKindSub2API, targetAuthCaptureRequest{AccessToken: strings.Repeat("a", maxImportedTokenBytes+1)}); err == nil {
+		t.Fatal("超长网页登录令牌应被拒绝")
+	}
+}
+
 func TestSensitiveSampleKeyCoversCompositeAndCamelCase(t *testing.T) {
 	for _, key := range []string{
 		"client_secret", "refreshToken", "authorizationHeader", "x-api-key", "privateKeyPem",
@@ -311,6 +419,10 @@ func TestSensitiveSampleKeyCoversCompositeAndCamelCase(t *testing.T) {
 }
 
 func newAPITestServer(t *testing.T) (*httptest.Server, *store.Store, *secure.Vault) {
+	return newAPITestServerWithPrivateTargets(t, false)
+}
+
+func newAPITestServerWithPrivateTargets(t *testing.T, allowPrivateTargets bool) (*httptest.Server, *store.Store, *secure.Vault) {
 	t.Helper()
 	database, err := store.Open(t.TempDir())
 	if err != nil {
@@ -329,17 +441,22 @@ func newAPITestServer(t *testing.T) (*httptest.Server, *store.Store, *secure.Vau
 	}
 	hub := events.NewHub()
 	alertEngine := alerts.NewEngine(database, nil)
-	schedulerService := scheduler.NewService(database, vault, apiTestRunner{}, alertEngine, false)
+	schedulerService := scheduler.NewService(database, vault, apiTestRunner{}, alertEngine, allowPrivateTargets)
 	server := NewServer(Dependencies{
 		Store: database, Vault: vault, Auth: authService, Scheduler: schedulerService,
 		Push: pushService, Events: hub, Static: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 			response.WriteHeader(http.StatusOK)
 		}),
+		AllowPrivateTargets: allowPrivateTargets,
 	})
 	return httptest.NewServer(server.Handler()), database, vault
 }
 
 func requestJSON(t *testing.T, client *http.Client, method, endpoint string, value any, origin string) (int, string) {
+	return requestJSONWithHeaders(t, client, method, endpoint, value, origin, nil)
+}
+
+func requestJSONWithHeaders(t *testing.T, client *http.Client, method, endpoint string, value any, origin string, headers map[string]string) (int, string) {
 	t.Helper()
 	var body io.Reader
 	if value != nil {
@@ -358,6 +475,9 @@ func requestJSON(t *testing.T, client *http.Client, method, endpoint string, val
 	}
 	if origin != "" {
 		request.Header.Set("Origin", origin)
+	}
+	for name, headerValue := range headers {
+		request.Header.Set(name, headerValue)
 	}
 	response, err := client.Do(request)
 	if err != nil {

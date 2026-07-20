@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AuthPage from '../pages/AuthPage'
 import SettingsPage from '../pages/SettingsPage'
-import TargetWizardPage, { targetToDraft } from '../pages/TargetWizardPage'
+import TargetWizardPage, { parseSub2APIOAuthCallback, targetToDraft } from '../pages/TargetWizardPage'
 import TargetDetailPage from '../pages/TargetDetailPage'
 import { AppShell } from '../components/AppShell'
 import { LineChart } from '../components/LineChart'
@@ -75,7 +75,42 @@ describe('渠道向导', () => {
     fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     expect(screen.getByRole('heading', { name: '登录与认证' })).toBeInTheDocument()
-    expect(screen.getByText('自动检测优先使用访问令牌或加密保存的二步验证密钥；一次性验证码只用于首次连接测试。若站点要求浏览器挑战，请直接粘贴访问令牌。')).toBeInTheDocument()
+    expect(screen.getByText('选择登录方式')).toBeInTheDocument()
+    expect(screen.getByText('支持 Linux.do、GitHub 等站点网页登录。')).toBeInTheDocument()
+  })
+
+  it('网页登录先准备任务再由真实点击打开渠道页面', async () => {
+    vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue({
+      id: 'auth_0123456789abcdef0123456789abcdef',
+      status: 'waiting',
+      loginUrl: 'https://api.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    })
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '授权渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '准备网页登录' }))
+    const launch = await screen.findByRole('button', { name: '打开授权窗口' })
+    expect(open).not.toHaveBeenCalled()
+    fireEvent.click(launch)
+    expect(open).toHaveBeenCalledWith('https://api.example.com/login', '_blank', 'noopener,noreferrer')
+  })
+
+  it('Sub2API OAuth 回调只解析同源 fragment 且不保留完整地址', () => {
+    expect(parseSub2APIOAuthCallback(
+      'https://sub.example.com/oauth/callback#access_token=access%2Evalue&refresh_token=refresh%2Bvalue',
+      'https://sub.example.com'
+    )).toEqual({ accessToken: 'access.value', refreshToken: 'refresh+value' })
+    expect(() => parseSub2APIOAuthCallback(
+      'https://other.example.com/oauth/callback#access_token=secret',
+      'https://sub.example.com'
+    )).toThrow('与当前渠道不是同一来源')
   })
 
   it('自动识别成功后切换渠道类型并显示结果', async () => {

@@ -1,6 +1,7 @@
 package secure
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -21,12 +22,13 @@ func TestVaultRoundTripAndTamper(t *testing.T) {
 		t.Fatalf("解密结果不正确: %q, %v", decoded, err)
 	}
 
-	last := encoded[len(encoded)-1]
-	replacement := byte('A')
-	if last == replacement {
-		replacement = 'B'
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("解析测试密文失败: %v", err)
 	}
-	_, err = vault.Decrypt(encoded[:len(encoded)-1] + string(replacement))
+	// 直接修改认证标签中的有效字节，避免只改变 Base64 未使用位而仍解码为相同内容。
+	payload[len(payload)-1] ^= 1
+	_, err = vault.Decrypt(base64.RawURLEncoding.EncodeToString(payload))
 	if err == nil {
 		t.Fatal("被篡改的密文应当校验失败")
 	}

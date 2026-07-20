@@ -123,6 +123,49 @@ func (adapter *newAPIAdapter) readSelf(ctx context.Context, session *requestSess
 	return newAPIEnvelopeObject(payload, true)
 }
 
+// VerifyBrowserCredential 使用浏览器会话读取当前用户，并校验会话所属用户与提交的用户 ID 一致。
+func (adapter *newAPIAdapter) VerifyBrowserCredential(ctx context.Context, target TargetConfig) (Credential, error) {
+	target = ensureTargetKind(target, adapter.Kind())
+	cookie := strings.TrimSpace(target.Credential.Cookie)
+	userID := strings.TrimSpace(target.Credential.UserID)
+	if cookie == "" {
+		return Credential{}, checkError(ErrorClassConfig, "校验 New API 网页登录", "网页登录会话不能为空", 0, nil)
+	}
+	if strings.ContainsAny(cookie, "\r\n") {
+		return Credential{}, checkError(ErrorClassConfig, "校验 New API 网页登录", "网页登录会话格式无效", 0, nil)
+	}
+	providedID := decimal.Zero
+	if userID != "" {
+		var err error
+		providedID, err = decimal.NewFromString(userID)
+		if err != nil || !providedID.IsPositive() || !providedID.Equal(providedID.Truncate(0)) {
+			return Credential{}, checkError(ErrorClassConfig, "校验 New API 网页登录", "用户 ID 格式无效", 0, err)
+		}
+	}
+
+	endpoint, err := joinTargetURL(target.BaseURL, "/api/user/self")
+	if err != nil {
+		return Credential{}, err
+	}
+	headers := make(http.Header)
+	headers.Set("Cookie", cookie)
+	if providedID.IsPositive() {
+		headers.Set("New-Api-User", providedID.StringFixed(0))
+	}
+	self, err := adapter.readSelf(ctx, adapter.http.newSession(target.AllowPrivateNetwork), endpoint, headers)
+	if err != nil {
+		return Credential{}, err
+	}
+	remoteID, err := decimalField(self, "id", "user_id")
+	if err != nil || !remoteID.IsPositive() || !remoteID.Equal(remoteID.Truncate(0)) {
+		return Credential{}, checkError(ErrorClassResponse, "校验 New API 网页登录", "渠道响应缺少有效用户 ID", 0, err)
+	}
+	if providedID.IsPositive() && !remoteID.Equal(providedID) {
+		return Credential{}, checkError(ErrorClassAuth, "校验 New API 网页登录", "网页登录会话与用户 ID 不匹配", 0, err)
+	}
+	return Credential{Cookie: cookie, UserID: remoteID.StringFixed(0)}, nil
+}
+
 func (adapter *newAPIAdapter) cachedSession(target TargetConfig) (*requestSession, http.Header, bool) {
 	if !newAPIUsesPassword(target.Credential) {
 		return nil, nil, false
@@ -198,10 +241,10 @@ func (adapter *newAPIAdapter) authenticate(ctx context.Context, session *request
 		username = strings.TrimSpace(credential.Email)
 	}
 	if username == "" || credential.Password == "" {
-		return nil, checkError(ErrorClassConfig, "配置 New API 认证", "请填写访问令牌或账号密码", 0, nil)
+		return nil, checkError(ErrorClassConfig, "配置 New API 认证", "请填写网页登录会话、访问令牌或账号密码", 0, nil)
 	}
 	if enabled, ok := boolField(status, "turnstile_check"); ok && enabled {
-		return nil, checkError(ErrorClassAuth, "登录 New API", "站点启用了浏览器验证，请改用访问令牌", 0, nil)
+		return nil, checkError(ErrorClassAuth, "登录 New API", "站点启用了浏览器验证，请改用网页登录或访问令牌", 0, nil)
 	}
 	loginURL, err := joinTargetURL(target.BaseURL, "/api/user/login")
 	if err != nil {
@@ -362,3 +405,4 @@ func newAPIUserEnabled(user map[string]any) bool {
 }
 
 var _ Adapter = (*newAPIAdapter)(nil)
+var _ BrowserCredentialVerifier = (*newAPIAdapter)(nil)

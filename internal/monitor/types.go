@@ -189,6 +189,11 @@ type Prober interface {
 	Probe(ctx context.Context, target TargetInput) (Result, any, error)
 }
 
+// BrowserCredentialVerifier 校验浏览器授权流程捕获的渠道凭据，并返回可持久化的规范化凭据。
+type BrowserCredentialVerifier interface {
+	VerifyBrowserCredential(ctx context.Context, target TargetInput) (Credential, error)
+}
+
 // Detector 根据只读公开端点识别渠道类型。
 type Detector interface {
 	Detect(ctx context.Context, baseURL string, allowPrivate bool) (TargetKind, error)

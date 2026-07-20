@@ -52,6 +52,7 @@ type Server struct {
 	secureCookie bool
 	publicOrigin string
 	limiter      *attemptLimiter
+	targetAuth   *targetAuthAttemptStore
 }
 
 // NewServer 创建并注册全部路由。
@@ -59,7 +60,11 @@ func NewServer(dependencies Dependencies) *Server {
 	if dependencies.Logger == nil {
 		dependencies.Logger = slog.Default()
 	}
-	server := &Server{dependencies: dependencies, limiter: newAttemptLimiter(10, 10*time.Minute)}
+	server := &Server{
+		dependencies: dependencies,
+		limiter:      newAttemptLimiter(10, 10*time.Minute),
+		targetAuth:   newTargetAuthAttemptStore(dependencies.Vault),
+	}
 	if parsed, err := url.Parse(dependencies.PublicBaseURL); err == nil && parsed.Host != "" {
 		server.secureCookie = parsed.Scheme == "https"
 		server.publicOrigin = parsed.Scheme + "://" + parsed.Host
@@ -86,6 +91,11 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/targets", s.protected(http.HandlerFunc(s.handleCreateTarget)))
 	mux.Handle("POST /api/targets/detect", s.protected(http.HandlerFunc(s.handleDetectTarget)))
 	mux.Handle("POST /api/targets/test", s.protected(http.HandlerFunc(s.handleTestTarget)))
+	mux.Handle("POST /api/target-auth/attempts", s.protected(http.HandlerFunc(s.handleCreateTargetAuthAttempt)))
+	mux.Handle("GET /api/target-auth/attempts/{id}", s.protected(http.HandlerFunc(s.handleTargetAuthAttempt)))
+	mux.Handle("DELETE /api/target-auth/attempts/{id}", s.protected(http.HandlerFunc(s.handleDeleteTargetAuthAttempt)))
+	mux.HandleFunc("GET /api/target-auth/native/{id}", s.handleNativeTargetAuthAttempt)
+	mux.HandleFunc("POST /api/target-auth/native/{id}/capture", s.handleCaptureTargetAuthAttempt)
 	mux.Handle("GET /api/targets/{id}", s.protected(http.HandlerFunc(s.handleTarget)))
 	mux.Handle("PUT /api/targets/{id}", s.protected(http.HandlerFunc(s.handleUpdateTarget)))
 	mux.Handle("DELETE /api/targets/{id}", s.protected(http.HandlerFunc(s.handleDeleteTarget)))

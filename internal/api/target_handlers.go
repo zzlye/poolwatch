@@ -71,6 +71,7 @@ func (s *Server) handleCreateTarget(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusInternalServerError, "保存渠道失败")
 		return
 	}
+	s.targetAuth.consume(draft.BrowserAuthAttemptID, adminFromContext(request.Context()).ID)
 	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.created", target.ID, "创建渠道", time.Now().UTC())
 	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": target.ID})
 	mapped, err := s.mapTarget(request.Context(), target)
@@ -130,6 +131,7 @@ func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusInternalServerError, "更新渠道失败")
 		return
 	}
+	s.targetAuth.consume(draft.BrowserAuthAttemptID, adminFromContext(request.Context()).ID)
 	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.updated", target.ID, "更新渠道", time.Now().UTC())
 	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": target.ID})
 	stored, _ := s.dependencies.Store.TargetByID(request.Context(), target.ID)
@@ -371,10 +373,11 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 	}
 	config.NewAPI.IncludeSubscription = seenKeys[monitor.MetricSubscriptionBalance]
 
-	credential, err := s.mergeCredential(ctx, draft, existing, kind)
+	credential, resolvedCredentialMode, err := s.mergeCredential(ctx, draft, existing, kind, baseURL)
 	if err != nil {
 		return store.Target{}, monitor.TargetConfig{}, err
 	}
+	config.CredentialMode = resolvedCredentialMode
 	if testing {
 		credential.TOTPCode = strings.TrimSpace(draft.TOTPCode)
 	} else {
@@ -437,31 +440,47 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 	return target, runtimeConfig, nil
 }
 
-func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existing *store.Target, kind monitor.TargetKind) (monitor.Credential, error) {
-	var credential monitor.Credential
-	if existing != nil && existing.Kind == string(kind) && existing.CredentialsEnc != "" {
-		decoded, err := s.dependencies.Vault.Decrypt(existing.CredentialsEnc)
-		if err != nil {
-			return monitor.Credential{}, errors.New("读取已有渠道凭据失败")
-		}
-		if json.Unmarshal(decoded, &credential) != nil {
-			return monitor.Credential{}, errors.New("已有渠道凭据格式无效")
-		}
+func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existing *store.Target, kind monitor.TargetKind, baseURL string) (monitor.Credential, credentialMode, error) {
+	credential, existingMode, err := s.existingCredential(existing, kind)
+	if err != nil {
+		return monitor.Credential{}, "", err
 	}
 	if kind == monitor.TargetKindNewAPI || kind == monitor.TargetKindSub2API {
-		if strings.TrimSpace(draft.AccessToken) != "" || (kind == monitor.TargetKindSub2API && strings.TrimSpace(draft.RefreshToken) != "") {
-			credential.Username = ""
-			credential.Email = ""
-			credential.Password = ""
-			credential.TOTPSecret = ""
-			if strings.TrimSpace(draft.AccessToken) == "" {
-				credential.AccessToken = ""
+		requestedMode := resolveCredentialMode(draft, kind, existingMode)
+		if strings.TrimSpace(draft.BrowserAuthAttemptID) != "" {
+			if !isBrowserCredentialMode(kind, requestedMode) {
+				return monitor.Credential{}, "", errors.New("网页登录尝试只能用于浏览器认证方式")
 			}
-		} else if strings.TrimSpace(draft.Password) != "" {
-			credential.AccessToken = ""
-			credential.RefreshToken = ""
+			attemptBaseURL, err := normalizeTargetBaseURL(baseURL)
+			if err != nil {
+				return monitor.Credential{}, "", errors.New("渠道地址无效")
+			}
+			imported, err := s.targetAuth.credential(
+				draft.BrowserAuthAttemptID,
+				adminFromContext(ctx).ID,
+				kind,
+				attemptBaseURL,
+			)
+			if err != nil {
+				return monitor.Credential{}, "", err
+			}
+			return imported, requestedMode, nil
 		}
+		if requestedMode != existingMode {
+			credential = monitor.Credential{}
+		}
+		switch kind {
+		case monitor.TargetKindNewAPI:
+			credential, err = mergeNewAPICredential(credential, draft, requestedMode)
+		case monitor.TargetKindSub2API:
+			credential, err = mergeSub2APICredential(credential, draft, requestedMode)
+		}
+		if err != nil {
+			return monitor.Credential{}, "", err
+		}
+		return credential, requestedMode, nil
 	}
+
 	mergeString(&credential.Username, draft.Username)
 	mergeString(&credential.Email, draft.Email)
 	mergeString(&credential.Password, draft.Password)
@@ -472,11 +491,11 @@ func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existin
 	mergeString(&credential.AdminKey, draft.AdminKey)
 	credential.TOTPCode = ""
 	if kind != monitor.TargetKindCustom {
-		return credential, nil
+		return credential, "", nil
 	}
 	switch strings.TrimSpace(draft.AuthType) {
 	case "", "none":
-		return monitor.Credential{}, nil
+		return monitor.Credential{}, "", nil
 	case "bearer":
 		credential.Headers = nil
 		credential.BasicUsername = ""
@@ -494,17 +513,233 @@ func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existin
 		var headers map[string]string
 		if strings.TrimSpace(draft.CustomHeaders) != "" && strings.TrimSpace(draft.CustomHeaders) != "{}" {
 			if err := json.Unmarshal([]byte(draft.CustomHeaders), &headers); err != nil {
-				return monitor.Credential{}, errors.New("自定义请求头必须是字符串键值 JSON 对象")
+				return monitor.Credential{}, "", errors.New("自定义请求头必须是字符串键值 JSON 对象")
 			}
 			credential.Headers = headers
 		}
 		if len(credential.Headers) == 0 {
-			return monitor.Credential{}, errors.New("自定义请求头认证至少需要一个请求头")
+			return monitor.Credential{}, "", errors.New("自定义请求头认证至少需要一个请求头")
 		}
 	default:
-		return monitor.Credential{}, errors.New("自定义认证方式不受支持")
+		return monitor.Credential{}, "", errors.New("自定义认证方式不受支持")
 	}
+	return credential, "", nil
+}
+
+func (s *Server) existingCredential(existing *store.Target, kind monitor.TargetKind) (monitor.Credential, credentialMode, error) {
+	if existing == nil || existing.Kind != string(kind) {
+		return monitor.Credential{}, "", nil
+	}
+	var mode credentialMode
+	if existing.ConfigJSON != "" {
+		var config storedTargetConfig
+		if err := json.Unmarshal([]byte(existing.ConfigJSON), &config); err != nil {
+			return monitor.Credential{}, "", errors.New("已有渠道配置格式无效")
+		}
+		mode = config.CredentialMode
+	}
+	var credential monitor.Credential
+	if existing.CredentialsEnc != "" {
+		decoded, err := s.dependencies.Vault.Decrypt(existing.CredentialsEnc)
+		if err != nil {
+			return monitor.Credential{}, "", errors.New("读取已有渠道凭据失败")
+		}
+		if json.Unmarshal(decoded, &credential) != nil {
+			return monitor.Credential{}, "", errors.New("已有渠道凭据格式无效")
+		}
+	}
+	if mode == "" {
+		mode = inferCredentialMode(kind, credential)
+	}
+	return credential, mode, nil
+}
+
+func resolveCredentialMode(draft targetDraft, kind monitor.TargetKind, existing credentialMode) credentialMode {
+	if mode := credentialMode(strings.TrimSpace(string(draft.CredentialMode))); mode != "" {
+		return mode
+	}
+	if strings.TrimSpace(draft.BrowserAuthAttemptID) != "" {
+		if kind == monitor.TargetKindNewAPI {
+			return credentialModeNewAPIBrowserSession
+		}
+		return credentialModeSub2APIBrowserOAuth
+	}
+	if kind == monitor.TargetKindNewAPI {
+		if strings.TrimSpace(draft.Cookie) != "" {
+			return credentialModeNewAPIBrowserSession
+		}
+		if strings.TrimSpace(draft.AccessToken) != "" {
+			return credentialModeNewAPIAccessToken
+		}
+		if strings.TrimSpace(draft.Password) != "" {
+			return credentialModeNewAPIPassword
+		}
+	} else {
+		if strings.TrimSpace(draft.Password) != "" {
+			return credentialModeSub2APIPassword
+		}
+		if strings.TrimSpace(draft.AccessToken) != "" || strings.TrimSpace(draft.RefreshToken) != "" {
+			return credentialModeSub2APIAccessToken
+		}
+	}
+	if existing != "" {
+		return existing
+	}
+	if kind == monitor.TargetKindSub2API {
+		return credentialModeSub2APIPassword
+	}
+	return credentialModeNewAPIPassword
+}
+
+func inferCredentialMode(kind monitor.TargetKind, credential monitor.Credential) credentialMode {
+	if kind == monitor.TargetKindNewAPI {
+		if strings.TrimSpace(credential.Cookie) != "" {
+			return credentialModeNewAPIBrowserSession
+		}
+		if strings.TrimSpace(credential.AccessToken) != "" {
+			return credentialModeNewAPIAccessToken
+		}
+		if credential.Password != "" {
+			return credentialModeNewAPIPassword
+		}
+		return ""
+	}
+	if strings.TrimSpace(credential.AccessToken) != "" || strings.TrimSpace(credential.RefreshToken) != "" {
+		return credentialModeSub2APIAccessToken
+	}
+	if credential.Password != "" {
+		return credentialModeSub2APIPassword
+	}
+	return ""
+}
+
+func isBrowserCredentialMode(kind monitor.TargetKind, mode credentialMode) bool {
+	return kind == monitor.TargetKindNewAPI && mode == credentialModeNewAPIBrowserSession ||
+		kind == monitor.TargetKindSub2API && mode == credentialModeSub2APIBrowserOAuth
+}
+
+func mergeNewAPICredential(credential monitor.Credential, draft targetDraft, mode credentialMode) (monitor.Credential, error) {
+	switch mode {
+	case credentialModeNewAPIPassword:
+		credential.AccessToken = ""
+		credential.RefreshToken = ""
+		credential.UserID = ""
+		credential.Cookie = ""
+		mergeString(&credential.Username, draft.Username)
+		mergeString(&credential.Email, draft.Email)
+		mergeString(&credential.Password, draft.Password)
+		mergeString(&credential.TOTPSecret, draft.TOTPSecret)
+		if (strings.TrimSpace(credential.Username) == "" && strings.TrimSpace(credential.Email) == "") || credential.Password == "" {
+			return monitor.Credential{}, errors.New("New API 密码登录需要账号和密码")
+		}
+	case credentialModeNewAPIAccessToken:
+		credential.Username = ""
+		credential.Email = ""
+		credential.Password = ""
+		credential.TOTPSecret = ""
+		credential.RefreshToken = ""
+		credential.Cookie = ""
+		mergeString(&credential.AccessToken, draft.AccessToken)
+		mergeString(&credential.UserID, draft.UserID)
+		if err := validateImportedToken(credential.AccessToken, "New API 访问令牌"); err != nil {
+			return monitor.Credential{}, err
+		}
+		if strings.TrimSpace(credential.UserID) == "" {
+			return monitor.Credential{}, errors.New("New API 访问令牌登录需要用户 ID")
+		}
+	case credentialModeNewAPIBrowserSession:
+		credential.Username = ""
+		credential.Email = ""
+		credential.Password = ""
+		credential.TOTPSecret = ""
+		credential.AccessToken = ""
+		credential.RefreshToken = ""
+		if strings.TrimSpace(draft.Cookie) != "" {
+			credential.Cookie = strings.TrimSpace(draft.Cookie)
+		}
+		mergeString(&credential.UserID, draft.UserID)
+		if err := validateImportedCookie(credential.Cookie); err != nil {
+			return monitor.Credential{}, err
+		}
+		if strings.TrimSpace(credential.UserID) == "" {
+			return monitor.Credential{}, errors.New("New API 网页登录需要用户 ID")
+		}
+	default:
+		return monitor.Credential{}, errors.New("New API 认证方式不受支持")
+	}
+	credential.TOTPCode = ""
 	return credential, nil
+}
+
+func mergeSub2APICredential(credential monitor.Credential, draft targetDraft, mode credentialMode) (monitor.Credential, error) {
+	switch mode {
+	case credentialModeSub2APIPassword:
+		credential.Username = ""
+		credential.AccessToken = ""
+		credential.RefreshToken = ""
+		credential.UserID = ""
+		credential.Cookie = ""
+		mergeString(&credential.Email, draft.Email)
+		mergeString(&credential.Password, draft.Password)
+		mergeString(&credential.TOTPSecret, draft.TOTPSecret)
+		if strings.TrimSpace(credential.Email) == "" || credential.Password == "" {
+			return monitor.Credential{}, errors.New("Sub2API 密码登录需要邮箱和密码")
+		}
+	case credentialModeSub2APIAccessToken, credentialModeSub2APIBrowserOAuth:
+		credential.Username = ""
+		credential.Email = ""
+		credential.Password = ""
+		credential.TOTPSecret = ""
+		credential.UserID = ""
+		credential.Cookie = ""
+		mergeString(&credential.AccessToken, draft.AccessToken)
+		mergeString(&credential.RefreshToken, draft.RefreshToken)
+		if credential.AccessToken == "" && credential.RefreshToken == "" {
+			return monitor.Credential{}, errors.New("Sub2API 令牌登录需要访问令牌或刷新令牌")
+		}
+		if credential.AccessToken != "" {
+			if err := validateImportedToken(credential.AccessToken, "Sub2API 访问令牌"); err != nil {
+				return monitor.Credential{}, err
+			}
+		}
+		if credential.RefreshToken != "" {
+			if err := validateImportedToken(credential.RefreshToken, "Sub2API 刷新令牌"); err != nil {
+				return monitor.Credential{}, err
+			}
+		}
+	default:
+		return monitor.Credential{}, errors.New("Sub2API 认证方式不受支持")
+	}
+	credential.TOTPCode = ""
+	return credential, nil
+}
+
+func validateImportedCookie(cookie string) error {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return errors.New("New API 网页登录需要会话 Cookie")
+	}
+	if len(cookie) > maxImportedCookieBytes {
+		return errors.New("网页登录会话超过 16 KB 限制")
+	}
+	if strings.ContainsAny(cookie, "\r\n") {
+		return errors.New("网页登录会话格式无效")
+	}
+	return nil
+}
+
+func validateImportedToken(token, label string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("%s不能为空", label)
+	}
+	if len(token) > maxImportedTokenBytes {
+		return fmt.Errorf("%s超过 64 KB 限制", label)
+	}
+	if strings.ContainsAny(token, "\r\n") {
+		return fmt.Errorf("%s格式无效", label)
+	}
+	return nil
 }
 
 func buildCustomConfig(draft targetDraft, thresholds []thresholdDraft) (monitor.CustomHTTPConfig, error) {
@@ -562,6 +797,16 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		CheckIntervalMinutes: target.PollIntervalSeconds / 60, LastError: target.LastError,
 		AuthConfigured: target.HasCredentials || (target.Kind == string(monitor.TargetKindCustom) && config.Custom.AuthMode == monitor.AuthModeNone),
 		Metrics:        make([]metricResponse, 0),
+	}
+	if target.Kind == string(monitor.TargetKindNewAPI) || target.Kind == string(monitor.TargetKindSub2API) {
+		result.CredentialMode = config.CredentialMode
+		if result.CredentialMode == "" {
+			_, inferredMode, err := s.existingCredential(&target, monitor.TargetKind(target.Kind))
+			if err != nil {
+				return targetResponse{}, err
+			}
+			result.CredentialMode = inferredMode
+		}
 	}
 	if !target.LastCheckedAt.IsZero() {
 		checked := target.LastCheckedAt

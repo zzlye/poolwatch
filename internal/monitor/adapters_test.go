@@ -145,6 +145,55 @@ func TestNewAPI遇到浏览器验证要求令牌(t *testing.T) {
 	}
 }
 
+func TestNewAPI网页登录会话可自动识别用户ID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/user/self", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Cookie") != "session=oauth" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"success": true, "data": map[string]any{"id": 52, "quota": 100}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newNewAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	credential, err := adapter.VerifyBrowserCredential(context.Background(), TargetConfig{
+		BaseURL: server.URL, AllowPrivateNetwork: true, Credential: Credential{Cookie: "session=oauth"},
+	})
+	if err != nil {
+		t.Fatalf("校验 New API 网页登录失败：%v", err)
+	}
+	if credential.Cookie != "session=oauth" || credential.UserID != "52" {
+		t.Fatalf("网页登录凭据规范化结果不正确：%#v", credential)
+	}
+}
+
+func TestSub2API网页登录令牌会读取当前用户(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/me", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer oauth-access" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"balance": "9.5", "status": "active"}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newSub2APIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	credential, err := adapter.VerifyBrowserCredential(context.Background(), TargetConfig{
+		BaseURL: server.URL, AllowPrivateNetwork: true,
+		Credential: Credential{AccessToken: "oauth-access", RefreshToken: "oauth-refresh"},
+	})
+	if err != nil {
+		t.Fatalf("校验 Sub2API 网页登录失败：%v", err)
+	}
+	if credential.AccessToken != "oauth-access" || credential.RefreshToken != "oauth-refresh" {
+		t.Fatalf("Sub2API 网页登录凭据规范化结果不正确：%#v", credential)
+	}
+}
+
 func TestNewAPI缓存会话失效后重新登录(t *testing.T) {
 	var loginRequests atomic.Int32
 	var selfRequests atomic.Int32

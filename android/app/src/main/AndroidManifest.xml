@@ -30,6 +30,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".auth.ChannelAuthActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":channel_auth"
+            android:theme="@style/Theme.PoolWatch" />
+
         <service
             android:name=".monitoring.RealtimeMonitorService"
             android:exported="false"

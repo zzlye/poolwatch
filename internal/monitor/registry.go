@@ -87,6 +87,19 @@ func (registry *Registry) Probe(ctx context.Context, target TargetInput) (Result
 	})
 }
 
+// VerifyBrowserCredential 将浏览器捕获的凭据交给对应适配器进行只读校验。
+func (registry *Registry) VerifyBrowserCredential(ctx context.Context, target TargetInput) (Credential, error) {
+	adapter, err := registry.Adapter(target.Kind)
+	if err != nil {
+		return Credential{}, err
+	}
+	verifier, ok := adapter.(BrowserCredentialVerifier)
+	if !ok {
+		return Credential{}, checkError(ErrorClassConfig, "校验网页登录凭据", "该渠道不支持网页登录凭据", 0, nil)
+	}
+	return verifier.VerifyBrowserCredential(ctx, target)
+}
+
 func runWithRetry(ctx context.Context, run func() (Result, any, error)) (Result, any, error) {
 	var result Result
 	var sample any
@@ -125,3 +138,4 @@ func NewAdapter(kind TargetKind, options HTTPOptions) (Adapter, error) {
 var _ Runner = (*Registry)(nil)
 var _ Prober = (*Registry)(nil)
 var _ Detector = (*Registry)(nil)
+var _ BrowserCredentialVerifier = (*Registry)(nil)

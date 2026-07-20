@@ -8,6 +8,7 @@ import type {
   SanitizedAccount,
   Settings,
   Target,
+  TargetAuthAttempt,
   TargetDraft,
   TargetStatus,
   TestConnectionResult,
@@ -124,6 +125,8 @@ let settings: Settings = {
   totpEnabled: false
 }
 
+const targetAuthAttempts = new Map<string, TargetAuthAttempt>()
+
 const pushInfo: PushInfo = {
   supported: true,
   vapidPublicKey: '',
@@ -164,7 +167,8 @@ function targetFromDraft(draft: TargetDraft, id: string = crypto.randomUUID()): 
     statusText: '等待首次检测',
     enabled: draft.enabled,
     checkIntervalMinutes: draft.checkIntervalMinutes,
-    authConfigured: Boolean(draft.password || draft.accessToken || draft.adminKey || draft.totpSecret || draft.authType === 'none'),
+    authConfigured: Boolean(draft.password || draft.accessToken || draft.cookie || draft.browserAuthAttemptId || draft.adminKey || draft.totpSecret || draft.authType === 'none'),
+    credentialMode: draft.credentialMode,
     metrics: draft.thresholds.map((threshold) => ({
       key: threshold.key,
       label: threshold.label,
@@ -217,6 +221,28 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
           : 'custom'
     const result: DetectTargetResult = { kind, message: `已识别为 ${targetKindLabels[kind]}` }
     return result as T
+  }
+  if (cleanPath === '/api/target-auth/attempts' && method === 'POST') {
+    const id = `auth_${crypto.randomUUID().replace(/-/g, '').slice(0, 32)}`
+    const attempt: TargetAuthAttempt = {
+      id,
+      status: 'waiting',
+      loginUrl: String(body.baseUrl ?? ''),
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      message: '请在渠道页面完成登录。'
+    }
+    targetAuthAttempts.set(id, attempt)
+    return attempt as T
+  }
+  if (cleanPath.startsWith('/api/target-auth/attempts/')) {
+    const id = decodeURIComponent(cleanPath.split('/')[4] ?? '')
+    const attempt = targetAuthAttempts.get(id)
+    if (!attempt) throw new Error('网页登录任务不存在或已经过期')
+    if (method === 'DELETE') {
+      targetAuthAttempts.set(id, { ...attempt, status: 'cancelled', message: '网页登录已取消。' })
+      return { ok: true } as T
+    }
+    return attempt as T
   }
   if (cleanPath === '/api/targets/test') {
     const result: TestConnectionResult = {

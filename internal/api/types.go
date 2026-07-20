@@ -22,6 +22,17 @@ type thresholdDraft struct {
 	Unit  string `json:"unit"`
 }
 
+type credentialMode string
+
+const (
+	credentialModeNewAPIPassword       credentialMode = "password"
+	credentialModeNewAPIAccessToken    credentialMode = "access_token"
+	credentialModeNewAPIBrowserSession credentialMode = "browser_session"
+	credentialModeSub2APIPassword      credentialMode = "password"
+	credentialModeSub2APIAccessToken   credentialMode = "access_token"
+	credentialModeSub2APIBrowserOAuth  credentialMode = "browser_oauth"
+)
+
 type targetDraft struct {
 	Name                 string           `json:"name"`
 	Kind                 string           `json:"kind"`
@@ -36,6 +47,9 @@ type targetDraft struct {
 	TOTPSecret           string           `json:"totpSecret"`
 	AccessToken          string           `json:"accessToken"`
 	RefreshToken         string           `json:"refreshToken"`
+	CredentialMode       credentialMode   `json:"credentialMode"`
+	Cookie               string           `json:"cookie"`
+	BrowserAuthAttemptID string           `json:"browserAuthAttemptId"`
 	AdminKey             string           `json:"adminKey"`
 	UserID               string           `json:"userId"`
 	AuthType             string           `json:"authType"`
@@ -79,6 +93,7 @@ type targetResponse struct {
 	NextCheckAt          *time.Time        `json:"nextCheckAt,omitempty"`
 	LastError            string            `json:"lastError,omitempty"`
 	AuthConfigured       bool              `json:"authConfigured"`
+	CredentialMode       credentialMode    `json:"credentialMode,omitempty"`
 	AuthType             string            `json:"authType,omitempty"`
 	RequestMethod        string            `json:"requestMethod,omitempty"`
 	ConfirmPOST          bool              `json:"confirmPost,omitempty"`
@@ -120,9 +135,10 @@ type settingsResponse struct {
 }
 
 type storedTargetConfig struct {
-	Thresholds    map[monitor.MetricKey]decimal.Decimal `json:"thresholds,omitempty"`
-	ThresholdMeta []thresholdDraft                      `json:"threshold_meta,omitempty"`
-	NewAPI        monitor.NewAPIConfig                  `json:"new_api,omitempty"`
-	ChatGPT2API   monitor.ChatGPT2APIConfig             `json:"chatgpt2api,omitempty"`
-	Custom        monitor.CustomHTTPConfig              `json:"custom,omitempty"`
+	Thresholds     map[monitor.MetricKey]decimal.Decimal `json:"thresholds,omitempty"`
+	ThresholdMeta  []thresholdDraft                      `json:"threshold_meta,omitempty"`
+	CredentialMode credentialMode                        `json:"credential_mode,omitempty"`
+	NewAPI         monitor.NewAPIConfig                  `json:"new_api,omitempty"`
+	ChatGPT2API    monitor.ChatGPT2APIConfig             `json:"chatgpt2api,omitempty"`
+	Custom         monitor.CustomHTTPConfig              `json:"custom,omitempty"`
 }

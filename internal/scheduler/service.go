@@ -171,6 +171,18 @@ func (s *Service) TestConfig(ctx context.Context, target monitor.TargetConfig) (
 	return result, nil, err
 }
 
+// VerifyBrowserCredential 在统一超时和私网策略下校验浏览器授权捕获的凭据。
+func (s *Service) VerifyBrowserCredential(ctx context.Context, target monitor.TargetConfig) (monitor.Credential, error) {
+	verifier, ok := s.runner.(monitor.BrowserCredentialVerifier)
+	if !ok {
+		return monitor.Credential{}, errors.New("当前检测器不支持网页登录凭据")
+	}
+	target.AllowPrivateNetwork = s.allowPrivateTargets
+	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
+	defer cancel()
+	return verifier.VerifyBrowserCredential(timeoutContext, target)
+}
+
 // DetectTarget 使用只读端点识别渠道类型。
 func (s *Service) DetectTarget(ctx context.Context, baseURL string) (monitor.TargetKind, error) {
 	detector, ok := s.runner.(monitor.Detector)

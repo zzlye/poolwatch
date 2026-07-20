@@ -8,6 +8,7 @@ import type {
   PushInfo,
   Settings,
   Target,
+  TargetAuthAttempt,
   TargetDraft,
   TestConnectionResult,
   TotpSetup
@@ -71,6 +72,10 @@ export const api = {
   dashboard: () => apiRequest<DashboardData>('/api/dashboard'),
   targets: () => apiRequest<Target[]>('/api/targets'),
   detectTarget: (baseUrl: string) => apiRequest<DetectTargetResult>('/api/targets/detect', { method: 'POST', body: jsonBody({ baseUrl }) }),
+  createTargetAuthAttempt: (payload: { kind: TargetDraft['kind']; baseUrl: string }) =>
+    apiRequest<TargetAuthAttempt>('/api/target-auth/attempts', { method: 'POST', body: jsonBody(payload) }),
+  targetAuthAttempt: (id: string) => apiRequest<TargetAuthAttempt>(`/api/target-auth/attempts/${encodeURIComponent(id)}`),
+  cancelTargetAuthAttempt: (id: string) => apiRequest<void>(`/api/target-auth/attempts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   target: (id: string) => apiRequest<Target>(`/api/targets/${encodeURIComponent(id)}`),
   createTarget: (payload: TargetDraft) => apiRequest<Target>('/api/targets', { method: 'POST', body: jsonBody(payload) }),
   updateTarget: (id: string, payload: TargetDraft) => apiRequest<Target>(`/api/targets/${encodeURIComponent(id)}`, { method: 'PUT', body: jsonBody(payload) }),
