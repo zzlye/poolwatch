@@ -12,6 +12,8 @@ export type MetricKey =
 
 export type TargetStatus = 'healthy' | 'warning' | 'error' | 'disabled' | 'unknown'
 
+export type AccountQuotaState = 'available' | 'unavailable' | 'unsupported'
+
 export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
@@ -26,6 +28,8 @@ export interface MetricValue {
   value: string
   unit: string
   threshold?: string
+  alertThreshold?: string
+  alertEnabled?: boolean
   comparison?: ThresholdComparison
   status: TargetStatus
 }
@@ -39,6 +43,13 @@ export interface Snapshot {
   measuredAt: string
 }
 
+export interface AccountQuotaWindow {
+  key: string
+  label: string
+  remainingPercent?: string
+  resetAt?: string
+}
+
 export interface SanitizedAccount {
   id: string
   displayName?: string
@@ -48,6 +59,9 @@ export interface SanitizedAccount {
   status: TargetStatus
   statusText?: string
   imageQuota?: string
+  quotaState?: AccountQuotaState
+  quotaWindows?: AccountQuotaWindow[]
+  subscriptionExpiresAt?: string
   recoveryAt?: string
   success?: number
   fail?: number
@@ -84,6 +98,7 @@ export interface ThresholdDraft {
   value: string
   unit: string
   comparison: ThresholdComparison
+  alertEnabled: boolean
 }
 
 export interface TargetDraft {

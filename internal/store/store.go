@@ -149,6 +149,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			status TEXT NOT NULL,
 			status_text TEXT NOT NULL DEFAULT '',
 			quota INTEGER NOT NULL DEFAULT 0,
+			quota_state TEXT NOT NULL DEFAULT '',
+			quota_windows_json TEXT NOT NULL DEFAULT '[]',
+			subscription_expires_at TEXT NOT NULL DEFAULT '',
 			restore_at TEXT NOT NULL DEFAULT '',
 			success INTEGER NOT NULL DEFAULT 0,
 			fail INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +181,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		{name: "display_name", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "provider", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "status_text", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "quota_state", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "quota_windows_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{name: "subscription_expires_at", definition: "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(ctx, "chat_accounts", column.name, column.definition); err != nil {
 			return err

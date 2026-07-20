@@ -16,11 +16,12 @@ type bootstrapResponse struct {
 }
 
 type thresholdDraft struct {
-	Key        string `json:"key"`
-	Label      string `json:"label"`
-	Value      string `json:"value"`
-	Unit       string `json:"unit"`
-	Comparison string `json:"comparison,omitempty"`
+	Key          string `json:"key"`
+	Label        string `json:"label"`
+	Value        string `json:"value"`
+	Unit         string `json:"unit"`
+	Comparison   string `json:"comparison,omitempty"`
+	AlertEnabled *bool  `json:"alertEnabled,omitempty"`
 }
 
 type credentialMode string
@@ -63,27 +64,39 @@ type targetDraft struct {
 }
 
 type metricResponse struct {
-	Key        string `json:"key"`
-	Label      string `json:"label"`
-	Value      string `json:"value"`
-	Unit       string `json:"unit"`
-	Threshold  string `json:"threshold,omitempty"`
-	Comparison string `json:"comparison,omitempty"`
-	Status     string `json:"status"`
+	Key            string `json:"key"`
+	Label          string `json:"label"`
+	Value          string `json:"value"`
+	Unit           string `json:"unit"`
+	Threshold      string `json:"threshold,omitempty"`
+	AlertThreshold string `json:"alertThreshold,omitempty"`
+	AlertEnabled   bool   `json:"alertEnabled"`
+	Comparison     string `json:"comparison,omitempty"`
+	Status         string `json:"status"`
+}
+
+type accountQuotaWindowResponse struct {
+	Key              string `json:"key"`
+	Label            string `json:"label"`
+	RemainingPercent string `json:"remainingPercent,omitempty"`
+	ResetAt          string `json:"resetAt,omitempty"`
 }
 
 type accountResponse struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName,omitempty"`
-	Provider    string `json:"provider,omitempty"`
-	Email       string `json:"email"`
-	Type        string `json:"type"`
-	Status      string `json:"status"`
-	StatusText  string `json:"statusText,omitempty"`
-	ImageQuota  string `json:"imageQuota,omitempty"`
-	RecoveryAt  string `json:"recoveryAt,omitempty"`
-	Success     int64  `json:"success"`
-	Fail        int64  `json:"fail"`
+	ID                    string                       `json:"id"`
+	DisplayName           string                       `json:"displayName,omitempty"`
+	Provider              string                       `json:"provider,omitempty"`
+	Email                 string                       `json:"email"`
+	Type                  string                       `json:"type"`
+	Status                string                       `json:"status"`
+	StatusText            string                       `json:"statusText,omitempty"`
+	ImageQuota            string                       `json:"imageQuota,omitempty"`
+	QuotaState            string                       `json:"quotaState,omitempty"`
+	QuotaWindows          []accountQuotaWindowResponse `json:"quotaWindows,omitempty"`
+	SubscriptionExpiresAt string                       `json:"subscriptionExpiresAt,omitempty"`
+	RecoveryAt            string                       `json:"recoveryAt,omitempty"`
+	Success               int64                        `json:"success"`
+	Fail                  int64                        `json:"fail"`
 }
 
 type targetResponse struct {

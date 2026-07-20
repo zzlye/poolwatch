@@ -37,19 +37,31 @@ function makeMockCLIProxyAccounts(total: number): SanitizedAccount[] {
   const providers = ['OpenAI', 'Anthropic', 'Gemini']
   const types = ['OAuth', 'API Key']
   const statuses: TargetStatus[] = ['healthy', 'warning', 'error', 'disabled']
-  // 模拟多个提供商和账号类型，用于验收 CLIProxyAPI 的独立筛选与分页。
-  return Array.from({ length: total }, (_, index) => ({
-    id: `cli-account-${index + 1}`,
-    displayName: `代理账号 ${index + 1}`,
-    email: `proxy${String(index + 1).padStart(2, '0')}***@example.com`,
-    provider: providers[index % providers.length],
-    type: types[index % types.length],
-    status: statuses[index % statuses.length],
-    statusText: statuses[index % statuses.length] === 'warning' ? '限流' : undefined,
-    recoveryAt: statuses[index % statuses.length] === 'warning' ? new Date(now + (index + 1) * 10 * 60_000).toISOString() : undefined,
-    success: 100 + index * 7,
-    fail: index % 5
-  }))
+  // 同时覆盖额度已获取、暂未获取和提供商不支持三种状态，便于跨端验收。
+  return Array.from({ length: total }, (_, index) => {
+    const provider = providers[index % providers.length]
+    const status = statuses[index % statuses.length]
+    const quotaState = provider === 'Anthropic' ? 'unsupported' : index % 5 === 2 ? 'unavailable' : 'available'
+    return {
+      id: `cli-account-${index + 1}`,
+      displayName: `代理账号 ${index + 1}`,
+      email: `proxy${String(index + 1).padStart(2, '0')}***@example.com`,
+      provider,
+      type: types[index % types.length],
+      status,
+      statusText: status === 'warning' ? '限流' : undefined,
+      quotaState,
+      quotaWindows: quotaState === 'available' ? [
+        { key: 'short', label: provider === 'Gemini' ? 'Gemini 2.5 Pro' : '5 小时额度', remainingPercent: String(Math.max(4, 96 - index * 4)), resetAt: new Date(now + (index + 1) * 30 * 60_000).toISOString() },
+        { key: 'weekly', label: '每周额度', remainingPercent: String(Math.max(8, 88 - index * 3)), resetAt: new Date(now + (index + 1) * 24 * 60 * 60_000).toISOString() },
+        ...(index === 0 ? [{ key: 'review', label: '代码审查额度', remainingPercent: '67.5', resetAt: new Date(now + 2 * 24 * 60 * 60_000).toISOString() }] : [])
+      ] : undefined,
+      subscriptionExpiresAt: provider === 'OpenAI' ? new Date(now + 30 * 24 * 60 * 60_000).toISOString() : undefined,
+      recoveryAt: status === 'warning' ? new Date(now + (index + 1) * 10 * 60_000).toISOString() : undefined,
+      success: 100 + index * 7,
+      fail: index % 5
+    }
+  })
 }
 
 let targets: Target[] = [
@@ -214,7 +226,9 @@ function targetFromDraft(draft: TargetDraft, id: string = crypto.randomUUID()): 
       label: threshold.label,
       value: '0',
       unit: threshold.unit,
-      threshold: threshold.value,
+      threshold: threshold.alertEnabled ? threshold.value : undefined,
+      alertThreshold: threshold.value,
+      alertEnabled: threshold.alertEnabled,
       comparison: threshold.comparison,
       status: 'unknown'
     }))

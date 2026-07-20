@@ -81,21 +81,32 @@ type PushSubscription struct {
 	LastUsedAt time.Time `json:"last_used_at"`
 }
 
+// AccountQuotaWindow 是持久化后的账号额度白名单视图。
+type AccountQuotaWindow struct {
+	Key              string `json:"key"`
+	Label            string `json:"label"`
+	RemainingPercent string `json:"remaining_percent,omitempty"`
+	ResetAt          string `json:"reset_at,omitempty"`
+}
+
 // ChatAccount 是号池账号的只读脱敏视图。
 type ChatAccount struct {
-	TargetID    string    `json:"target_id"`
-	ExternalID  string    `json:"id"`
-	DisplayName string    `json:"display_name,omitempty"`
-	Provider    string    `json:"provider,omitempty"`
-	Email       string    `json:"email,omitempty"`
-	Type        string    `json:"type,omitempty"`
-	Status      string    `json:"status"`
-	StatusText  string    `json:"status_text,omitempty"`
-	Quota       int64     `json:"quota"`
-	RestoreAt   string    `json:"restore_at,omitempty"`
-	Success     int64     `json:"success"`
-	Fail        int64     `json:"fail"`
-	ObservedAt  time.Time `json:"observed_at"`
+	TargetID              string               `json:"target_id"`
+	ExternalID            string               `json:"id"`
+	DisplayName           string               `json:"display_name,omitempty"`
+	Provider              string               `json:"provider,omitempty"`
+	Email                 string               `json:"email,omitempty"`
+	Type                  string               `json:"type,omitempty"`
+	Status                string               `json:"status"`
+	StatusText            string               `json:"status_text,omitempty"`
+	Quota                 int64                `json:"quota"`
+	QuotaState            string               `json:"quota_state,omitempty"`
+	QuotaWindows          []AccountQuotaWindow `json:"quota_windows,omitempty"`
+	SubscriptionExpiresAt string               `json:"subscription_expires_at,omitempty"`
+	RestoreAt             string               `json:"restore_at,omitempty"`
+	Success               int64                `json:"success"`
+	Fail                  int64                `json:"fail"`
+	ObservedAt            time.Time            `json:"observed_at"`
 }
 
 // AlertWithTarget 为告警列表附加渠道显示名称。

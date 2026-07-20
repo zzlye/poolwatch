@@ -125,7 +125,7 @@ export default function TargetDetailPage() {
 
       {target.kind === 'cliproxyapi' ? (
         <section className="content-section" aria-labelledby="cliproxy-account-title">
-          <div className="section-heading"><div><h2 id="cliproxy-account-title">CLIProxyAPI 账号状态</h2><p>只读显示账号、提供商、类型、状态、调用统计与恢复时间。</p></div></div>
+          <div className="section-heading"><div><h2 id="cliproxy-account-title">CLIProxyAPI 账号状态</h2><p>只读显示账号、提供商、类型、状态、真实额度、调用统计与恢复时间。</p></div></div>
           {target.accounts?.length ? <CLIProxyAccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
         </section>
       ) : null}

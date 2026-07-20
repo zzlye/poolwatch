@@ -347,12 +347,12 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 		Thresholds:           make(map[monitor.MetricKey]decimal.Decimal),
 		ThresholdComparisons: make(map[monitor.MetricKey]monitor.ThresholdComparison),
 	}
+	previousThresholdValues, err := storedThresholdValues(existing, kind)
+	if err != nil {
+		return store.Target{}, monitor.TargetConfig{}, err
+	}
 	seenKeys := make(map[monitor.MetricKey]bool)
 	for index, threshold := range draft.Thresholds {
-		value, err := decimal.NewFromString(strings.TrimSpace(threshold.Value))
-		if err != nil || value.IsNegative() {
-			return store.Target{}, monitor.TargetConfig{}, errors.New("告警阈值必须是大于或等于零的十进制数")
-		}
 		key := monitor.MetricKey(strings.TrimSpace(threshold.Key))
 		if kind == monitor.TargetKindCustom {
 			if index == 0 {
@@ -365,7 +365,18 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 			return store.Target{}, monitor.TargetConfig{}, errors.New("指标键重复或为空")
 		}
 		seenKeys[key] = true
-		config.Thresholds[key] = value
+		alertEnabled := thresholdAlertEnabled(threshold)
+		rawValue := strings.TrimSpace(threshold.Value)
+		var value decimal.Decimal
+		if rawValue == "" && !alertEnabled {
+			// 关闭告警时允许前端清空输入；编辑渠道优先沿用上次配置，新建渠道则使用零值。
+			value = previousThresholdValues[key]
+		} else {
+			value, err = decimal.NewFromString(rawValue)
+			if err != nil || value.IsNegative() {
+				return store.Target{}, monitor.TargetConfig{}, errors.New("告警阈值必须是大于或等于零的十进制数")
+			}
+		}
 		comparison := monitor.ThresholdComparison(strings.ToLower(strings.TrimSpace(threshold.Comparison)))
 		if comparison == "" {
 			comparison = monitor.ThresholdComparisonLTE
@@ -374,17 +385,20 @@ func (s *Server) buildTarget(ctx context.Context, draft targetDraft, existing *s
 			return store.Target{}, monitor.TargetConfig{}, errors.New("告警比较方式只支持 lte 或 gte")
 		}
 		config.ThresholdComparisons[key] = comparison
+		if alertEnabled {
+			config.Thresholds[key] = value
+		}
 		meta := thresholdDraft{
 			Key: string(key), Label: strings.TrimSpace(threshold.Label), Value: value.String(),
-			Unit: strings.TrimSpace(threshold.Unit), Comparison: string(comparison),
+			Unit: strings.TrimSpace(threshold.Unit), Comparison: string(comparison), AlertEnabled: boolPointer(alertEnabled),
 		}
 		if meta.Label == "" {
 			meta.Label = metricLabel(key)
 		}
 		config.ThresholdMeta = append(config.ThresholdMeta, meta)
 	}
-	if len(config.Thresholds) == 0 {
-		return store.Target{}, monitor.TargetConfig{}, errors.New("至少需要配置一个告警阈值")
+	if len(config.ThresholdMeta) == 0 {
+		return store.Target{}, monitor.TargetConfig{}, errors.New("至少需要配置一个监控指标")
 	}
 	config.NewAPI.IncludeSubscription = seenKeys[monitor.MetricSubscriptionBalance]
 
@@ -874,20 +888,29 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return targetResponse{}, err
 	}
-	visibleMetricKeys := make(map[string]bool, len(result.Metrics))
-	for _, metric := range result.Metrics {
-		visibleMetricKeys[metric.Key] = true
+	visibleMetricIndexes := make(map[string]int, len(result.Metrics))
+	for index, metric := range result.Metrics {
+		visibleMetricIndexes[metric.Key] = index
 	}
 	for _, meta := range config.ThresholdMeta {
-		if visibleMetricKeys[meta.Key] {
+		if index, exists := visibleMetricIndexes[meta.Key]; exists {
+			// 告警关闭时仍返回配置值，编辑页面可直接恢复原阈值，而详情页只使用生效中的 threshold。
+			result.Metrics[index].AlertEnabled = thresholdAlertEnabled(meta)
+			result.Metrics[index].AlertThreshold = meta.Value
+			result.Metrics[index].Comparison = string(monitor.NormalizeThresholdComparison(monitor.ThresholdComparison(meta.Comparison)))
 			continue
 		}
 		// 尚未读取到的已配置指标仍需返回，确保编辑页面不会意外关闭监控项。
-		result.Metrics = append(result.Metrics, metricResponse{
-			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, Threshold: meta.Value,
-			Comparison: string(monitor.NormalizeThresholdComparison(monitor.ThresholdComparison(meta.Comparison))),
-			Status:     string(monitor.TargetStatusUnknown),
-		})
+		item := metricResponse{
+			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, AlertThreshold: meta.Value,
+			AlertEnabled: thresholdAlertEnabled(meta),
+			Comparison:   string(monitor.NormalizeThresholdComparison(monitor.ThresholdComparison(meta.Comparison))),
+			Status:       string(monitor.TargetStatusUnknown),
+		}
+		if item.AlertEnabled {
+			item.Threshold = meta.Value
+		}
+		result.Metrics = append(result.Metrics, item)
 	}
 	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
 		accounts, err := s.dependencies.Store.ListChatAccounts(ctx, target.ID)
@@ -906,6 +929,16 @@ func mapAccountResponse(targetKind string, account store.ChatAccount) accountRes
 		ID: account.ExternalID, DisplayName: account.DisplayName, Provider: account.Provider,
 		Email: account.Email, Type: account.Type, Status: account.Status, StatusText: account.StatusText,
 		RecoveryAt: account.RestoreAt, Success: account.Success, Fail: account.Fail,
+	}
+	if targetKind == string(monitor.TargetKindCLIProxyAPI) {
+		result.QuotaState = account.QuotaState
+		result.SubscriptionExpiresAt = account.SubscriptionExpiresAt
+		result.QuotaWindows = make([]accountQuotaWindowResponse, 0, len(account.QuotaWindows))
+		for _, window := range account.QuotaWindows {
+			result.QuotaWindows = append(result.QuotaWindows, accountQuotaWindowResponse{
+				Key: window.Key, Label: window.Label, RemainingPercent: window.RemainingPercent, ResetAt: window.ResetAt,
+			})
+		}
 	}
 	// 图片额度只属于 chatgpt2api，CLIProxyAPI 账号响应不携带没有实际含义的零值字段。
 	if targetKind == string(monitor.TargetKindChatGPT2API) {
@@ -926,11 +959,48 @@ func mapMonitorMetrics(metrics []monitor.Metric, targetStatus string) []metricRe
 		item := metricResponse{Key: string(metric.Key), Label: metric.Label, Value: metric.Value.String(), Unit: metric.Unit, Status: status}
 		if metric.Threshold != nil {
 			item.Threshold = metric.Threshold.String()
+			item.AlertThreshold = item.Threshold
+			item.AlertEnabled = true
 			item.Comparison = string(monitor.NormalizeThresholdComparison(metric.Comparison))
 		}
 		result = append(result, item)
 	}
 	return result
+}
+
+// thresholdAlertEnabled 兼容旧版请求与已保存配置；缺少开关时沿用原先默认启用告警的语义。
+func thresholdAlertEnabled(threshold thresholdDraft) bool {
+	return threshold.AlertEnabled == nil || *threshold.AlertEnabled
+}
+
+// storedThresholdValues 汇总旧配置中的展示阈值，兼容只有生效阈值的早期配置。
+func storedThresholdValues(existing *store.Target, kind monitor.TargetKind) (map[monitor.MetricKey]decimal.Decimal, error) {
+	values := make(map[monitor.MetricKey]decimal.Decimal)
+	if existing == nil || existing.Kind != string(kind) || strings.TrimSpace(existing.ConfigJSON) == "" {
+		return values, nil
+	}
+	var config storedTargetConfig
+	if err := json.Unmarshal([]byte(existing.ConfigJSON), &config); err != nil {
+		return nil, errors.New("已有渠道配置格式无效")
+	}
+	for key, value := range config.Thresholds {
+		if !value.IsNegative() {
+			values[key] = value
+		}
+	}
+	for _, meta := range config.ThresholdMeta {
+		key := monitor.MetricKey(strings.TrimSpace(meta.Key))
+		value, err := decimal.NewFromString(strings.TrimSpace(meta.Value))
+		if key == "" || err != nil || value.IsNegative() {
+			continue
+		}
+		values[key] = value
+	}
+	return values, nil
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func validateHTTPURL(raw string, required bool) (string, error) {

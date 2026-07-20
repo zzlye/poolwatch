@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"poolwatch/internal/identity"
 	"poolwatch/internal/monitor"
 	"poolwatch/internal/store"
@@ -292,6 +294,11 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 			recoveryAt = account.RestoreAt
 		}
 		recoveryAt = sanitizeAccountText(recoveryAt, 100)
+		quotaWindows := sanitizeAccountQuotaWindows(account.QuotaWindows)
+		quotaState := sanitizeAccountQuotaState(account.QuotaState)
+		if quotaState == monitor.AccountQuotaStateAvailable && len(quotaWindows) == 0 {
+			quotaState = monitor.AccountQuotaStateUnavailable
+		}
 		stableValue := strings.ToLower(strings.TrimSpace(account.ExternalID))
 		if stableValue == "" {
 			stableValue = strings.Join([]string{maskedEmail, displayName, provider, accountType, fmt.Sprintf("%d", index)}, "|")
@@ -300,10 +307,80 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 		result = append(result, store.ChatAccount{
 			TargetID: targetID, ExternalID: externalID, DisplayName: displayName, Provider: provider,
 			Email: maskedEmail, Type: accountType, Status: normalizeAccountStatus(account.Status), StatusText: statusText,
-			Quota: account.Quota.IntPart(), RestoreAt: recoveryAt, Success: account.Success, Fail: account.Fail, ObservedAt: observedAt,
+			Quota: account.Quota.IntPart(), QuotaState: quotaState, QuotaWindows: quotaWindows,
+			SubscriptionExpiresAt: sanitizeAccountTimestamp(account.SubscriptionExpiresAt), RestoreAt: recoveryAt,
+			Success: account.Success, Fail: account.Fail, ObservedAt: observedAt,
 		})
 	}
 	return result
+}
+
+func sanitizeAccountQuotaState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case monitor.AccountQuotaStateAvailable:
+		return monitor.AccountQuotaStateAvailable
+	case monitor.AccountQuotaStateUnavailable:
+		return monitor.AccountQuotaStateUnavailable
+	case monitor.AccountQuotaStateUnsupported:
+		return monitor.AccountQuotaStateUnsupported
+	default:
+		return ""
+	}
+}
+
+// sanitizeAccountQuotaWindows 只持久化额度展示所需的白名单字段，并限制条目数量与数值范围。
+func sanitizeAccountQuotaWindows(windows []monitor.AccountQuotaWindow) []store.AccountQuotaWindow {
+	result := make([]store.AccountQuotaWindow, 0, len(windows))
+	for _, window := range windows {
+		if len(result) >= 64 {
+			break
+		}
+		key := sanitizeAccountQuotaKey(window.Key)
+		label := sanitizeAccountText(window.Label, 120)
+		if key == "" || label == "" {
+			continue
+		}
+		remaining := ""
+		if window.RemainingPercent != nil && !window.RemainingPercent.IsNegative() &&
+			!window.RemainingPercent.GreaterThan(decimal.NewFromInt(100)) {
+			remaining = window.RemainingPercent.String()
+		}
+		resetAt := sanitizeAccountTimestamp(window.ResetAt)
+		if remaining == "" && resetAt == "" {
+			continue
+		}
+		result = append(result, store.AccountQuotaWindow{
+			Key: key, Label: label, RemainingPercent: remaining, ResetAt: resetAt,
+		})
+	}
+	return result
+}
+
+func sanitizeAccountQuotaKey(value string) string {
+	value = sanitizeAccountText(value, 120)
+	if value == "" {
+		return ""
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("-_.:/+", character) {
+			continue
+		}
+		return ""
+	}
+	return value
+}
+
+func sanitizeAccountTimestamp(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" || len(raw) > 100 || strings.ContainsAny(raw, "\r\n\x00") {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || parsed.IsZero() || parsed.Year() < 2000 || parsed.Year() > 2200 {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339Nano)
 }
 
 func maskEmail(email string) string {

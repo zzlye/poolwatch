@@ -179,6 +179,66 @@ func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 		t.Fatalf("已配置但尚未读取到的订阅指标未保留: %d %s", status, body)
 	}
 	if err := database.CreateAlert(context.Background(), store.Alert{
+		ID: "alert_disabled_subscription", TargetID: created.ID, Type: string(monitor.AlertTypeQuotaLow),
+		MetricKey: string(monitor.MetricSubscriptionBalance), State: "open", Title: "订阅余额不足", OpenedAt: time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("创建待关闭告警的订阅事件失败: %v", err)
+	}
+	createBody["thresholds"] = []map[string]any{
+		{"key": "wallet_balance", "label": "钱包余额", "value": "10", "unit": "元"},
+		{"key": "subscription_balance", "label": "订阅余额", "value": "", "unit": "元", "alertEnabled": false},
+	}
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/targets/"+created.ID, createBody, "")
+	if status != http.StatusOK {
+		t.Fatalf("仅关闭订阅额度告警失败: %d %s", status, body)
+	}
+	storedSubscriptionDisplay, err := database.TargetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取仅展示订阅额度的渠道失败: %v", err)
+	}
+	var subscriptionDisplayConfig storedTargetConfig
+	if err := json.Unmarshal([]byte(storedSubscriptionDisplay.ConfigJSON), &subscriptionDisplayConfig); err != nil ||
+		!subscriptionDisplayConfig.NewAPI.IncludeSubscription {
+		t.Fatalf("关闭告警后仍应读取订阅额度: %s, %v", storedSubscriptionDisplay.ConfigJSON, err)
+	}
+	if _, exists := subscriptionDisplayConfig.Thresholds[monitor.MetricSubscriptionBalance]; exists {
+		t.Fatalf("关闭告警后不应保留订阅生效阈值: %s", storedSubscriptionDisplay.ConfigJSON)
+	}
+	var subscriptionDisplayTarget targetResponse
+	if err := json.Unmarshal([]byte(body), &subscriptionDisplayTarget); err != nil {
+		t.Fatalf("解析仅展示订阅额度的渠道失败: %v", err)
+	}
+	var subscriptionDisplayMetric *metricResponse
+	for index := range subscriptionDisplayTarget.Metrics {
+		if subscriptionDisplayTarget.Metrics[index].Key == string(monitor.MetricSubscriptionBalance) {
+			subscriptionDisplayMetric = &subscriptionDisplayTarget.Metrics[index]
+			break
+		}
+	}
+	if subscriptionDisplayMetric == nil || subscriptionDisplayMetric.AlertEnabled || subscriptionDisplayMetric.Threshold != "" || subscriptionDisplayMetric.AlertThreshold != "0" {
+		t.Fatalf("关闭告警后订阅额度展示配置不正确: %#v", subscriptionDisplayMetric)
+	}
+	disabledAlert, err := database.AlertByID(context.Background(), "alert_disabled_subscription")
+	if err != nil || disabledAlert.State != "resolved" || disabledAlert.RecoveredAt == nil {
+		t.Fatalf("关闭已有指标告警后应立即解决活跃事件：%#v, %v", disabledAlert, err)
+	}
+	createBody["thresholds"] = []map[string]any{
+		{"key": "wallet_balance", "label": "钱包余额", "value": "", "unit": "元", "alertEnabled": false},
+		{"key": "subscription_balance", "label": "订阅余额", "value": "", "unit": "元", "alertEnabled": false},
+	}
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/targets/"+created.ID, createBody, "")
+	if status != http.StatusOK || !strings.Contains(body, `"key":"wallet_balance"`) || !strings.Contains(body, `"alertThreshold":"10"`) {
+		t.Fatalf("关闭告警并清空阈值后未保留原配置值: %d %s", status, body)
+	}
+	createBody["thresholds"] = []map[string]string{
+		{"key": "wallet_balance", "label": "钱包余额", "value": "10", "unit": "元"},
+		{"key": "subscription_balance", "label": "订阅余额", "value": "0", "unit": "元"},
+	}
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/targets/"+created.ID, createBody, "")
+	if status != http.StatusOK {
+		t.Fatalf("重新开启订阅额度告警失败: %d %s", status, body)
+	}
+	if err := database.CreateAlert(context.Background(), store.Alert{
 		ID: "alert_removed_subscription", TargetID: created.ID, Type: string(monitor.AlertTypeQuotaLow),
 		MetricKey: string(monitor.MetricSubscriptionBalance), State: "open", Title: "订阅余额不足", OpenedAt: time.Now().UTC().Add(-time.Minute),
 	}); err != nil {
@@ -422,8 +482,9 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 	draft := map[string]any{
 		"name": "CLIProxyAPI", "kind": "cliproxyapi", "baseUrl": "https://cli.example.com", "topupUrl": "",
 		"enabled": true, "checkIntervalMinutes": 5, "adminKey": "management-secret",
-		"thresholds": []map[string]string{
+		"thresholds": []map[string]any{
 			{"key": "healthy_accounts", "label": "可用账号", "value": "1", "unit": "个", "comparison": "lte"},
+			{"key": "limited_accounts", "label": "限流账号", "value": "", "unit": "个", "comparison": "gte", "alertEnabled": false},
 			{"key": "error_accounts", "label": "异常账号", "value": "1", "unit": "个", "comparison": "gte"},
 		},
 	}
@@ -444,6 +505,22 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 		config.ThresholdComparisons[monitor.MetricErrorAccounts] != monitor.ThresholdComparisonGTE {
 		t.Fatalf("比较方向未正确保存：%s, %v", stored.ConfigJSON, err)
 	}
+	if _, exists := config.Thresholds[monitor.MetricLimitedAccounts]; exists {
+		t.Fatalf("关闭告警的限流指标不应生成生效阈值：%s", stored.ConfigJSON)
+	}
+	if len(config.ThresholdMeta) != 3 || thresholdAlertEnabled(config.ThresholdMeta[1]) {
+		t.Fatalf("关闭告警的限流指标配置未保留：%s", stored.ConfigJSON)
+	}
+	var limitedMetric *metricResponse
+	for index := range created.Metrics {
+		if created.Metrics[index].Key == string(monitor.MetricLimitedAccounts) {
+			limitedMetric = &created.Metrics[index]
+			break
+		}
+	}
+	if limitedMetric == nil || limitedMetric.AlertEnabled || limitedMetric.Threshold != "" || limitedMetric.AlertThreshold != "0" {
+		t.Fatalf("关闭告警的限流指标仍应返回展示配置：%#v", limitedMetric)
+	}
 	credentialJSON, err := vault.Decrypt(stored.CredentialsEnc)
 	if err != nil || !strings.Contains(string(credentialJSON), "management-secret") {
 		t.Fatalf("管理密钥未加密保存: %v", err)
@@ -462,21 +539,35 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 func TestCLIProxyAPIAccountResponseOmitsImageQuota(t *testing.T) {
 	account := store.ChatAccount{
 		ExternalID: "hashed-account", Provider: "codex", Type: "oauth", Status: string(monitor.TargetStatusHealthy), Quota: 77,
+		QuotaState: monitor.AccountQuotaStateAvailable, QuotaWindows: []store.AccountQuotaWindow{{
+			Key: "code-5h", Label: "5 小时", RemainingPercent: "75", ResetAt: "2026-07-20T09:00:00Z",
+		}},
+		SubscriptionExpiresAt: "2026-08-20T08:00:00Z",
 	}
-	cliPayload, err := json.Marshal(mapAccountResponse(string(monitor.TargetKindCLIProxyAPI), account))
+	cliResponse := mapAccountResponse(string(monitor.TargetKindCLIProxyAPI), account)
+	cliPayload, err := json.Marshal(cliResponse)
 	if err != nil {
 		t.Fatalf("序列化 CLIProxyAPI 账号响应失败: %v", err)
 	}
 	if strings.Contains(string(cliPayload), "imageQuota") {
 		t.Fatalf("CLIProxyAPI 账号响应不应包含图片额度：%s", cliPayload)
 	}
+	if cliResponse.QuotaState != monitor.AccountQuotaStateAvailable || cliResponse.SubscriptionExpiresAt != "2026-08-20T08:00:00Z" ||
+		len(cliResponse.QuotaWindows) != 1 || cliResponse.QuotaWindows[0].RemainingPercent != "75" {
+		t.Fatalf("CLIProxyAPI 账号额度响应不完整：%#v", cliResponse)
+	}
 
-	chatPayload, err := json.Marshal(mapAccountResponse(string(monitor.TargetKindChatGPT2API), account))
+	chatResponse := mapAccountResponse(string(monitor.TargetKindChatGPT2API), account)
+	chatPayload, err := json.Marshal(chatResponse)
 	if err != nil {
 		t.Fatalf("序列化 chatgpt2api 账号响应失败: %v", err)
 	}
 	if !strings.Contains(string(chatPayload), `"imageQuota":"77"`) {
 		t.Fatalf("chatgpt2api 账号响应应继续包含图片额度：%s", chatPayload)
+	}
+	if strings.Contains(string(chatPayload), "quotaState") || strings.Contains(string(chatPayload), "quotaWindows") ||
+		strings.Contains(string(chatPayload), "subscriptionExpiresAt") {
+		t.Fatalf("chatgpt2api 账号响应不应包含 CLIProxyAPI 额度字段：%s", chatPayload)
 	}
 }
 

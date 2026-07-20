@@ -55,7 +55,9 @@ func TestMigrationAddsGeneralAccountColumns(t *testing.T) {
 		}
 		columns[name] = true
 	}
-	for _, name := range []string{"display_name", "provider", "status_text"} {
+	for _, name := range []string{
+		"display_name", "provider", "status_text", "quota_state", "quota_windows_json", "subscription_expires_at",
+	} {
 		if !columns[name] {
 			t.Fatalf("旧账号表升级后缺少字段：%s", name)
 		}
@@ -157,7 +159,11 @@ func TestChatAccounts支持泛化安全字段(t *testing.T) {
 	if err := database.ReplaceChatAccounts(ctx, target.ID, []ChatAccount{{
 		TargetID: target.ID, ExternalID: "hashed-id", DisplayName: "主账号", Provider: "codex",
 		Email: "pr***@example.com", Type: "plus", Status: "warning", StatusText: "额度冷却中",
-		RestoreAt: "2026-07-21T00:00:00Z", Success: 8, Fail: 2, ObservedAt: now,
+		QuotaState: "available", QuotaWindows: []AccountQuotaWindow{{
+			Key: "code-5h", Label: "5 小时", RemainingPercent: "42.5", ResetAt: "2026-07-20T09:00:00Z",
+		}},
+		SubscriptionExpiresAt: "2026-08-20T08:00:00Z",
+		RestoreAt:             "2026-07-21T00:00:00Z", Success: 8, Fail: 2, ObservedAt: now,
 	}}); err != nil {
 		t.Fatalf("保存泛化账号失败: %v", err)
 	}
@@ -169,6 +175,10 @@ func TestChatAccounts支持泛化安全字段(t *testing.T) {
 	if account.DisplayName != "主账号" || account.Provider != "codex" || account.StatusText != "额度冷却中" ||
 		account.Success != 8 || account.Fail != 2 {
 		t.Fatalf("泛化账号字段不完整：%#v", account)
+	}
+	if account.QuotaState != "available" || account.SubscriptionExpiresAt != "2026-08-20T08:00:00Z" ||
+		len(account.QuotaWindows) != 1 || account.QuotaWindows[0].RemainingPercent != "42.5" {
+		t.Fatalf("泛化账号额度字段不完整：%#v", account)
 	}
 
 	columns := map[string]bool{}
@@ -186,7 +196,9 @@ func TestChatAccounts支持泛化安全字段(t *testing.T) {
 		}
 		columns[name] = true
 	}
-	for _, name := range []string{"display_name", "provider", "status_text"} {
+	for _, name := range []string{
+		"display_name", "provider", "status_text", "quota_state", "quota_windows_json", "subscription_expires_at",
+	} {
 		if !columns[name] {
 			t.Fatalf("账号表缺少迁移字段：%s", name)
 		}
@@ -217,6 +229,7 @@ func TestRefreshTargetMonitoringConfig保留历史并清理取消指标(t *testi
 	for _, alert := range []Alert{
 		{ID: "alert_subscription", TargetID: target.ID, Type: "threshold", MetricKey: "subscription_balance", State: "open", Title: "订阅余额不足", OpenedAt: now.Add(-time.Minute)},
 		{ID: "alert_wallet", TargetID: target.ID, Type: "threshold", MetricKey: "wallet_balance", State: "open", Title: "钱包余额不足", OpenedAt: now.Add(-time.Minute)},
+		{ID: "alert_recovered", TargetID: target.ID, Type: "recovered", MetricKey: "subscription_balance", State: "resolved", Title: "订阅余额已恢复", OpenedAt: now.Add(-30 * time.Second)},
 	} {
 		if err := database.CreateAlert(ctx, alert); err != nil {
 			t.Fatalf("创建告警失败: %v", err)
@@ -241,6 +254,21 @@ func TestRefreshTargetMonitoringConfig保留历史并清理取消指标(t *testi
 	}
 	if _, err := database.ActiveAlert(ctx, target.ID, "threshold", "wallet_balance"); err != nil {
 		t.Fatalf("仍在监控的指标告警应继续保留: %v", err)
+	}
+	resolved, err := database.AlertByID(ctx, "alert_subscription")
+	if err != nil || resolved.LastNotifiedAt == nil {
+		t.Fatalf("关闭指标后应终止旧告警的待发送状态: %#v, %v", resolved, err)
+	}
+	pending, err := database.ListUnnotifiedAlerts(ctx, 10)
+	if err != nil {
+		t.Fatalf("读取待发送告警失败: %v", err)
+	}
+	pendingIDs := make(map[string]bool, len(pending))
+	for _, item := range pending {
+		pendingIDs[item.ID] = true
+	}
+	if pendingIDs["alert_subscription"] || !pendingIDs["alert_wallet"] || !pendingIDs["alert_recovered"] {
+		t.Fatalf("关闭指标后待发送事件不正确: %#v", pendingIDs)
 	}
 }
 

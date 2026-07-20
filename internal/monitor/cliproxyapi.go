@@ -10,11 +10,15 @@ import (
 )
 
 type cliProxyAPIAdapter struct {
-	http *secureHTTPClient
+	http                *secureHTTPClient
+	quotaCache          *cliProxyAPIQuotaCache
+	quotaRequestTimeout time.Duration
 }
 
 func newCLIProxyAPIAdapter(client *secureHTTPClient) *cliProxyAPIAdapter {
-	return &cliProxyAPIAdapter{http: client}
+	return &cliProxyAPIAdapter{
+		http: client, quotaCache: newCLIProxyAPIQuotaCache(), quotaRequestTimeout: cliProxyAPIQuotaAccountTimeout,
+	}
 }
 
 func (adapter *cliProxyAPIAdapter) Kind() TargetKind {
@@ -33,14 +37,16 @@ func (adapter *cliProxyAPIAdapter) Check(ctx context.Context, target TargetConfi
 	}
 	headers := make(http.Header)
 	setBearer(headers, managementKey)
+	session := adapter.http.newSession(target.AllowPrivateNetwork)
 	var payload any
-	if err := adapter.http.newSession(target.AllowPrivateNetwork).doJSON(ctx, http.MethodGet, endpoint, headers, nil, &payload); err != nil {
+	if err := session.doJSON(ctx, http.MethodGet, endpoint, headers, nil, &payload); err != nil {
 		return Snapshot{}, err
 	}
-	accounts, err := parseCLIProxyAPIAccounts(payload, time.Now().UTC())
+	accounts, rawAccounts, err := parseCLIProxyAPIAccounts(payload, time.Now().UTC())
 	if err != nil {
 		return Snapshot{}, err
 	}
+	adapter.enrichCLIProxyAPIAccounts(ctx, session, target, managementKey, accounts, rawAccounts)
 
 	counts := map[TargetStatus]int64{
 		TargetStatusHealthy:  0,
@@ -72,16 +78,17 @@ func (adapter *cliProxyAPIAdapter) Check(ctx context.Context, target TargetConfi
 	return snapshot, nil
 }
 
-func parseCLIProxyAPIAccounts(payload any, now time.Time) ([]AccountStatus, error) {
+func parseCLIProxyAPIAccounts(payload any, now time.Time) ([]AccountStatus, []map[string]any, error) {
 	root, ok := payload.(map[string]any)
 	if !ok {
-		return nil, checkError(ErrorClassResponse, "解析 CLIProxyAPI 账号", "CLIProxyAPI 响应格式无效", 0, nil)
+		return nil, nil, checkError(ErrorClassResponse, "解析 CLIProxyAPI 账号", "CLIProxyAPI 响应格式无效", 0, nil)
 	}
 	items, ok := root["files"].([]any)
 	if !ok {
-		return nil, checkError(ErrorClassResponse, "解析 CLIProxyAPI 账号", "CLIProxyAPI 响应缺少 files", 0, nil)
+		return nil, nil, checkError(ErrorClassResponse, "解析 CLIProxyAPI 账号", "CLIProxyAPI 响应缺少 files", 0, nil)
 	}
 	result := make([]AccountStatus, 0, len(items))
+	rawAccounts := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		raw, ok := item.(map[string]any)
 		if !ok {
@@ -89,21 +96,27 @@ func parseCLIProxyAPIAccounts(payload any, now time.Time) ([]AccountStatus, erro
 		}
 		status, statusText, recoveryAt := classifyCLIProxyAPIAccount(raw, now)
 		provider := safeCLIProxyAPIIdentifier(stringField(raw, "provider", "type"), 80)
+		accountType := cliProxyAPIPlanType(raw)
+		if accountType == "" {
+			accountType = safeCLIProxyAPIIdentifier(stringField(raw, "account_type"), 80)
+		}
 		result = append(result, AccountStatus{
 			// 上游标识只进入后续哈希流程，序列化时会被忽略。
-			ExternalID:  stringField(raw, "auth_index", "id"),
-			DisplayName: safeCLIProxyAPIText(stringField(raw, "label"), 120),
-			Provider:    provider,
-			Email:       safeCLIProxyAPIEmail(stringField(raw, "email")),
-			Type:        safeCLIProxyAPIIdentifier(stringField(raw, "account_type"), 80),
-			Status:      string(status),
-			StatusText:  statusText,
-			RecoveryAt:  recoveryAt,
-			Success:     int64Field(raw, "success"),
-			Fail:        int64Field(raw, "failed"),
+			ExternalID:            stringField(raw, "auth_index", "id"),
+			DisplayName:           safeCLIProxyAPIText(stringField(raw, "label"), 120),
+			Provider:              provider,
+			Email:                 safeCLIProxyAPIEmail(stringField(raw, "email")),
+			Type:                  accountType,
+			Status:                string(status),
+			StatusText:            statusText,
+			SubscriptionExpiresAt: parseCLIProxyAPISubscriptionExpiry(raw),
+			RecoveryAt:            recoveryAt,
+			Success:               int64Field(raw, "success"),
+			Fail:                  int64Field(raw, "failed"),
 		})
+		rawAccounts = append(rawAccounts, raw)
 	}
-	return result, nil
+	return result, rawAccounts, nil
 }
 
 func classifyCLIProxyAPIAccount(account map[string]any, now time.Time) (TargetStatus, string, string) {

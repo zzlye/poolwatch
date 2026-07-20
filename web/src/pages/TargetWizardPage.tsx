@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, Check, Download, ExternalLink, Eye, EyeOff, Flas
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
-import type { CredentialMode, Target, TargetAuthAttempt, TargetDraft, TargetKind, TestConnectionResult, ThresholdDraft } from '../types'
+import type { CredentialMode, MetricValue, Target, TargetAuthAttempt, TargetDraft, TargetKind, TestConnectionResult, ThresholdDraft } from '../types'
 import { metricLabels, targetKindLabels } from '../types'
 
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
@@ -26,19 +26,20 @@ const newAPISubscriptionThreshold: ThresholdDraft = {
   label: '订阅余额',
   value: '20',
   unit: '站点单位',
-  comparison: 'lte'
+  comparison: 'lte',
+  alertEnabled: true
 }
 
 const thresholdsByKind: Record<TargetKind, ThresholdDraft[]> = {
-  new_api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位', comparison: 'lte' }],
-  sub2api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: 'USD', comparison: 'lte' }],
-  chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次', comparison: 'lte' }],
+  new_api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: '站点单位', comparison: 'lte', alertEnabled: true }],
+  sub2api: [{ key: 'wallet_balance', label: '钱包余额', value: '20', unit: 'USD', comparison: 'lte', alertEnabled: true }],
+  chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次', comparison: 'lte', alertEnabled: true }],
   cliproxyapi: [
-    { key: 'healthy_accounts', label: '可用账号', value: '0', unit: '个', comparison: 'lte' },
-    { key: 'limited_accounts', label: '限流账号', value: '1', unit: '个', comparison: 'gte' },
-    { key: 'error_accounts', label: '异常账号', value: '1', unit: '个', comparison: 'gte' }
+    { key: 'healthy_accounts', label: '可用账号', value: '0', unit: '个', comparison: 'lte', alertEnabled: true },
+    { key: 'limited_accounts', label: '限流账号', value: '1', unit: '个', comparison: 'gte', alertEnabled: true },
+    { key: 'error_accounts', label: '异常账号', value: '1', unit: '个', comparison: 'gte', alertEnabled: true }
   ],
-  custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个', comparison: 'lte' }]
+  custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个', comparison: 'lte', alertEnabled: true }]
 }
 
 function defaultCredentialMode(kind: TargetKind): CredentialMode {
@@ -77,8 +78,43 @@ function makeDraft(kind: TargetKind = 'new_api', checkIntervalMinutes = 5): Targ
   }
 }
 
+// 接口会同时返回采集到的指标和已配置指标，只有带告警配置的额外指标才应在编辑时写回。
+function isConfiguredMetric(metric: MetricValue): boolean {
+  return metric.alertThreshold !== undefined || metric.threshold !== undefined || metric.alertEnabled === true
+}
+
+// 将接口指标恢复为表单阈值，并兼容尚未返回告警开关的旧版数据。
+function metricToThreshold(metric: MetricValue, fallback?: ThresholdDraft): ThresholdDraft {
+  return {
+    key: metric.key,
+    label: metric.label || fallback?.label || metricLabels[metric.key],
+    value: metric.alertThreshold ?? metric.threshold ?? fallback?.value ?? '0',
+    unit: metric.unit || fallback?.unit || '',
+    comparison: metric.comparison ?? fallback?.comparison ?? 'lte',
+    alertEnabled: metric.alertEnabled ?? metric.threshold !== undefined
+  }
+}
+
 export function targetToDraft(target: Target): TargetDraft {
   const draft = makeDraft(target.kind)
+  const configuredMetrics = new Map(target.metrics.map((item) => [item.key, item]))
+  let thresholdDefaults = thresholdsByKind[target.kind]
+  const subscriptionMetric = configuredMetrics.get('subscription_balance')
+  if (target.kind === 'new_api' && subscriptionMetric && isConfiguredMetric(subscriptionMetric)) {
+    thresholdDefaults = [...thresholdDefaults, newAPISubscriptionThreshold]
+  }
+  const defaultMetricKeys = new Set(thresholdDefaults.map((item) => item.key))
+  const thresholds = target.kind === 'custom'
+    ? target.metrics.map((item) => metricToThreshold(item, thresholdsByKind.custom[0]))
+    : [
+        ...thresholdDefaults.map((fallback) => {
+          const metric = configuredMetrics.get(fallback.key)
+          return metric ? metricToThreshold(metric, fallback) : { ...fallback }
+        }),
+        ...target.metrics
+          .filter((metric) => !defaultMetricKeys.has(metric.key) && isConfiguredMetric(metric))
+          .map((metric) => metricToThreshold(metric))
+      ]
   return {
     ...draft,
     name: target.name,
@@ -94,14 +130,7 @@ export function targetToDraft(target: Target): TargetDraft {
     statusPointer: target.statusPointer ?? draft.statusPointer,
     // 自定义请求头可能包含秘密，接口只返回是否已配置；编辑时留空表示沿用原值。
     customHeaders: target.customHeadersConfigured ? '' : draft.customHeaders,
-    thresholds: target.metrics.filter((item) => item.threshold !== undefined).map((item) => ({
-      key: item.key,
-      label: item.label,
-      value: item.threshold ?? '',
-      unit: item.unit,
-      // 旧版本数据没有比较方向，沿用原有的“小于等于”语义。
-      comparison: item.comparison ?? 'lte'
-    }))
+    thresholds
   }
 }
 
@@ -194,7 +223,8 @@ function BrowserAuthorizationFields({
   editing,
   configured,
   attempt,
-  setAttempt
+  setAttempt,
+  isCurrentAuthTarget
 }: {
   draft: TargetDraft
   update: (patch: Partial<TargetDraft>) => void
@@ -202,6 +232,7 @@ function BrowserAuthorizationFields({
   configured: boolean
   attempt: TargetAuthAttempt | null
   setAttempt: (attempt: TargetAuthAttempt | null) => void
+  isCurrentAuthTarget: (kind: TargetKind, baseUrl: string) => boolean
 }) {
   const isAndroidApp = typeof navigator !== 'undefined' && navigator.userAgent.includes('PoolWatchAndroid/')
   const [pollError, setPollError] = useState('')
@@ -218,6 +249,7 @@ function BrowserAuthorizationFields({
   const helperTimeout = useRef(0)
 
   const applyAttempt = (next: TargetAuthAttempt) => {
+    if (!isCurrentAuthTarget(draft.kind, draft.baseUrl)) return false
     setAttempt(next)
     if (next.status === 'ready') {
       update({ browserAuthAttemptId: next.id, userId: next.userId || draft.userId })
@@ -225,6 +257,7 @@ function BrowserAuthorizationFields({
     } else if (next.status === 'expired' || next.status === 'cancelled') {
       update({ browserAuthAttemptId: '' })
     }
+    return true
   }
 
   const requestBrowserHelper = (next: TargetAuthAttempt) => {
@@ -255,7 +288,10 @@ function BrowserAuthorizationFields({
   const createMutation = useMutation({
     mutationFn: () => api.createTargetAuthAttempt({ kind: draft.kind, baseUrl: draft.baseUrl }),
     onSuccess: (next) => {
-      applyAttempt(next)
+      if (!applyAttempt(next)) {
+        helperAfterCreate.current = false
+        return
+      }
       if (helperAfterCreate.current) {
         helperAfterCreate.current = false
         requestBrowserHelper(next)
@@ -466,13 +502,15 @@ function AuthenticationFields({
   update,
   existing,
   attempt,
-  setAttempt
+  setAttempt,
+  isCurrentAuthTarget
 }: {
   draft: TargetDraft
   update: (patch: Partial<TargetDraft>) => void
   existing?: Target
   attempt: TargetAuthAttempt | null
   setAttempt: (attempt: TargetAuthAttempt | null) => void
+  isCurrentAuthTarget: (kind: TargetKind, baseUrl: string) => boolean
 }) {
   const [showSecret, setShowSecret] = useState(false)
   const editing = Boolean(existing)
@@ -527,7 +565,7 @@ function AuthenticationFields({
       </fieldset>
 
       {draft.credentialMode === 'browser_session' || draft.credentialMode === 'browser_oauth' ? (
-        <BrowserAuthorizationFields draft={draft} update={update} editing={editing} configured={configuredForCurrentMode} attempt={attempt} setAttempt={setAttempt} />
+        <BrowserAuthorizationFields draft={draft} update={update} editing={editing} configured={configuredForCurrentMode} attempt={attempt} setAttempt={setAttempt} isCurrentAuthTarget={isCurrentAuthTarget} />
       ) : null}
 
       {draft.credentialMode === 'access_token' ? (
@@ -570,9 +608,18 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null)
   const [detectionMessage, setDetectionMessage] = useState('')
   const [authAttempt, setAuthAttempt] = useState<TargetAuthAttempt | null>(null)
+  const authTargetRef = useRef({ kind: draft.kind, baseUrl: draft.baseUrl })
   const editing = Boolean(existing)
 
   const update = (patch: Partial<TargetDraft>) => setDraft((current) => ({ ...current, ...patch }))
+  const isCurrentAuthTarget = (kind: TargetKind, baseUrl: string) => authTargetRef.current.kind === kind && authTargetRef.current.baseUrl === baseUrl
+  const changeBaseUrl = (baseUrl: string) => {
+    // 地址一旦变化就立即作废旧授权上下文，异步返回的旧任务也不会重新覆盖当前表单。
+    authTargetRef.current = { kind: draft.kind, baseUrl }
+    update({ baseUrl, browserAuthAttemptId: '' })
+    setAuthAttempt(null)
+    setDetectionMessage('')
+  }
   const subscriptionMonitoringEnabled = draft.thresholds.some((item) => item.key === 'subscription_balance')
   const setSubscriptionMonitoring = (enabled: boolean) => {
     setDraft((current) => {
@@ -585,6 +632,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
   }
   const changeKind = (kind: TargetKind, preserveDetectionMessage = false) => {
     const candidate = getTopupCandidate(draft.baseUrl, kind)
+    authTargetRef.current = { kind, baseUrl: draft.baseUrl }
     setDraft((current) => ({
       ...current,
       kind,
@@ -651,7 +699,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
       return setError('请填写 CLIProxyAPI 管理密钥。'), false
     }
     if (step === 2) {
-      if (!draft.thresholds.length || draft.thresholds.some((item) => !item.value || !Number.isFinite(Number(item.value)))) return setError('每个指标都需要填写有效阈值。'), false
+      if (!draft.thresholds.length || draft.thresholds.some((item) => item.alertEnabled && (!item.value || !Number.isFinite(Number(item.value))))) return setError('已开启告警的指标需要填写有效阈值。'), false
       if (draft.kind === 'custom' && !draft.jsonPointer.startsWith('/')) return setError('指标字段必须使用以 / 开头的 JSON Pointer。'), false
     }
     if (step === 3) {
@@ -682,7 +730,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
           <div className="form-grid">
             <label className="field"><span>渠道名称 <b aria-hidden="true">*</b></span><input autoFocus value={draft.name} onChange={(event) => update({ name: event.target.value })} placeholder="例如：主站额度" /></label>
             <label className="field"><span>渠道类型</span><select value={draft.kind} onChange={(event) => changeKind(event.target.value as TargetKind)}>{Object.entries(targetKindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <div className="field span-2"><label htmlFor="target-base-url">站点地址 <b aria-hidden="true">*</b></label><div className="url-detect-row"><input id="target-base-url" type="url" value={draft.baseUrl} onChange={(event) => { update({ baseUrl: event.target.value, browserAuthAttemptId: '' }); setAuthAttempt(null); setDetectionMessage('') }} onBlur={() => { if (!draft.topupUrl) update({ topupUrl: getTopupCandidate(draft.baseUrl, draft.kind) }) }} placeholder="https://api.example.com" inputMode="url" />{!editing ? <button className="button secondary" type="button" disabled={detectMutation.isPending || !draft.baseUrl.trim()} onClick={() => { setError(''); if (!validateUrl(draft.baseUrl)) { setError('请先输入有效的 HTTP 或 HTTPS 地址。'); return } detectMutation.mutate() }}>{detectMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Search aria-hidden="true" size={18} />}{detectMutation.isPending ? '识别中' : '自动识别'}</button> : null}</div><small>只允许 HTTP/HTTPS。服务器默认会阻止回环、内网和云元数据地址。</small></div>
+            <div className="field span-2"><label htmlFor="target-base-url">站点地址 <b aria-hidden="true">*</b></label><div className="url-detect-row"><input id="target-base-url" type="url" value={draft.baseUrl} onChange={(event) => changeBaseUrl(event.target.value)} onBlur={() => { if (!draft.topupUrl) update({ topupUrl: getTopupCandidate(draft.baseUrl, draft.kind) }) }} placeholder="https://api.example.com" inputMode="url" />{!editing ? <button className="button secondary" type="button" disabled={detectMutation.isPending || !draft.baseUrl.trim()} onClick={() => { setError(''); if (!validateUrl(draft.baseUrl)) { setError('请先输入有效的 HTTP 或 HTTPS 地址。'); return } detectMutation.mutate() }}>{detectMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Search aria-hidden="true" size={18} />}{detectMutation.isPending ? '识别中' : '自动识别'}</button> : null}</div><small>只允许 HTTP/HTTPS。服务器默认会阻止回环、内网和云元数据地址。</small></div>
             {detectionMessage ? <div className="span-2"><InlineMessage tone="success">{detectionMessage}</InlineMessage></div> : null}
             {detectMutation.error ? <div className="span-2"><InlineMessage tone="danger">{detectMutation.error.message}</InlineMessage></div> : null}
           </div>
@@ -690,11 +738,11 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
 
         {step === 1 ? <>
           <div className="panel-heading"><h2 id="step-title-1">登录与认证</h2><p>秘密只发送到服务器并加密保存，页面不会重新显示。</p></div>
-          <div className="form-grid"><AuthenticationFields draft={draft} update={update} existing={existing} attempt={authAttempt} setAttempt={setAuthAttempt} /></div>
+          <div className="form-grid"><AuthenticationFields draft={draft} update={update} existing={existing} attempt={authAttempt} setAttempt={setAuthAttempt} isCurrentAuthTarget={isCurrentAuthTarget} /></div>
         </> : null}
 
         {step === 2 ? <>
-          <div className="panel-heading"><h2 id="step-title-2">指标与阈值</h2><p>每个指标按自己的比较方向独立判断，不同单位不会相加。</p></div>
+          <div className="panel-heading"><h2 id="step-title-2">指标与阈值</h2><p>可按指标单独关闭告警；关闭后仍会展示数值，不会按该阈值提醒。</p></div>
           {draft.kind === 'custom' ? (
             <div className="form-grid custom-map-fields">
               <label className="field"><span>请求方法</span><select value={draft.requestMethod} onChange={(event) => update({ requestMethod: event.target.value as 'GET' | 'POST', confirmPost: false })}><option value="GET">GET</option><option value="POST">POST</option></select></label>
@@ -716,9 +764,9 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
             ) : null}
             {draft.thresholds.map((threshold, index) => (
               <div className="threshold-row" key={`${threshold.key}-${index}`}>
-                {draft.kind === 'custom' ? <label className="field"><span>指标名称</span><input value={threshold.label} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item) })} /></label> : <div className="threshold-label"><span>{threshold.label || metricLabels[threshold.key]}</span><small>{threshold.key}</small></div>}
-                <label className="field"><span>告警条件</span><select value={threshold.comparison} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: event.target.value as ThresholdDraft['comparison'] } : item) })}><option value="lte">小于或等于（≤）</option><option value="gte">大于或等于（≥）</option></select></label>
-                <label className="field"><span>告警阈值</span><input type="number" min="0" step="any" value={threshold.value} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item) })} inputMode="decimal" /></label>
+                {draft.kind === 'custom' ? <div className="custom-threshold-settings"><label className="field"><span>指标名称</span><input value={threshold.label} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item) })} /></label><label className="threshold-label threshold-alert-option custom-threshold-alert-option"><input type="checkbox" checked={threshold.alertEnabled} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, alertEnabled: event.target.checked } : item) })} aria-label={`${threshold.label || metricLabels[threshold.key]}告警`} /><span><strong>额度告警</strong><small>{threshold.alertEnabled ? '已开启告警' : '仅展示，不告警'}</small></span></label></div> : <label className="threshold-label threshold-alert-option"><input type="checkbox" checked={threshold.alertEnabled} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, alertEnabled: event.target.checked } : item) })} aria-label={`${threshold.label || metricLabels[threshold.key]}告警`} /><span><strong>{threshold.label || metricLabels[threshold.key]}</strong><small>{threshold.key} · {threshold.alertEnabled ? '已开启告警' : '仅展示，不告警'}</small></span></label>}
+                <label className="field"><span>告警条件</span><select value={threshold.comparison} disabled={!threshold.alertEnabled} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, comparison: event.target.value as ThresholdDraft['comparison'] } : item) })}><option value="lte">小于或等于（≤）</option><option value="gte">大于或等于（≥）</option></select></label>
+                <label className="field"><span>告警阈值</span><input type="number" min="0" step="any" value={threshold.value} disabled={!threshold.alertEnabled} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item) })} inputMode="decimal" /></label>
                 <label className="field"><span>单位</span><input value={threshold.unit} onChange={(event) => update({ thresholds: draft.thresholds.map((item, itemIndex) => itemIndex === index ? { ...item, unit: event.target.value } : item) })} readOnly={draft.kind !== 'custom'} /></label>
               </div>
             ))}

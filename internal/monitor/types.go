@@ -62,6 +62,13 @@ const (
 	TargetStatusUnknown  TargetStatus = "unknown"
 )
 
+const (
+	// 额度状态只描述是否拿到了上游真实数据，不参与渠道健康状态判断。
+	AccountQuotaStateAvailable   = "available"
+	AccountQuotaStateUnavailable = "unavailable"
+	AccountQuotaStateUnsupported = "unsupported"
+)
+
 // AlertType 表示上层告警状态机使用的事件类型。
 type AlertType string
 
@@ -154,17 +161,29 @@ type Metric struct {
 	Comparison ThresholdComparison `json:"comparison,omitempty"`
 }
 
+// AccountQuotaWindow 表示单个账号由上游明确返回的一项额度窗口。
+// RemainingPercent 为空时只展示重置时间，不推测或补造剩余额度。
+type AccountQuotaWindow struct {
+	Key              string           `json:"key"`
+	Label            string           `json:"label"`
+	RemainingPercent *decimal.Decimal `json:"remaining_percent,omitempty"`
+	ResetAt          string           `json:"reset_at,omitempty"`
+}
+
 // AccountStatus 是号池账号明细的严格白名单视图。
 type AccountStatus struct {
-	ExternalID  string          `json:"-"`
-	DisplayName string          `json:"display_name,omitempty"`
-	Provider    string          `json:"provider,omitempty"`
-	Email       string          `json:"email,omitempty"`
-	Type        string          `json:"type,omitempty"`
-	Status      string          `json:"status"`
-	StatusText  string          `json:"status_text,omitempty"`
-	Quota       decimal.Decimal `json:"quota"`
-	RecoveryAt  string          `json:"recovery_at,omitempty"`
+	ExternalID            string               `json:"-"`
+	DisplayName           string               `json:"display_name,omitempty"`
+	Provider              string               `json:"provider,omitempty"`
+	Email                 string               `json:"email,omitempty"`
+	Type                  string               `json:"type,omitempty"`
+	Status                string               `json:"status"`
+	StatusText            string               `json:"status_text,omitempty"`
+	Quota                 decimal.Decimal      `json:"quota"`
+	QuotaState            string               `json:"quota_state,omitempty"`
+	QuotaWindows          []AccountQuotaWindow `json:"quota_windows,omitempty"`
+	SubscriptionExpiresAt string               `json:"subscription_expires_at,omitempty"`
+	RecoveryAt            string               `json:"recovery_at,omitempty"`
 	// RestoreAt 只为兼容旧适配器和历史测试保留，新代码统一使用 RecoveryAt。
 	RestoreAt     string `json:"-"`
 	Success       int64  `json:"success"`

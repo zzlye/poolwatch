@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -90,10 +91,16 @@ func (s *Store) ReplaceChatAccounts(ctx context.Context, targetID string, accoun
 		return err
 	}
 	for _, account := range accounts {
+		quotaWindowsJSON, err := json.Marshal(account.QuotaWindows)
+		if err != nil {
+			return fmt.Errorf("序列化账号额度失败: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO chat_accounts(
-			target_id, external_id, display_name, provider, email, type, status, status_text, quota, restore_at, success, fail, observed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, account.ExternalID, account.DisplayName,
+			target_id, external_id, display_name, provider, email, type, status, status_text, quota,
+			quota_state, quota_windows_json, subscription_expires_at, restore_at, success, fail, observed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, account.ExternalID, account.DisplayName,
 			account.Provider, account.Email, account.Type, account.Status, account.StatusText, account.Quota,
+			account.QuotaState, string(quotaWindowsJSON), account.SubscriptionExpiresAt,
 			account.RestoreAt, account.Success, account.Fail, formatTime(account.ObservedAt)); err != nil {
 			return fmt.Errorf("保存脱敏号池账号失败: %w", err)
 		}
@@ -104,7 +111,7 @@ func (s *Store) ReplaceChatAccounts(ctx context.Context, targetID string, accoun
 // ListChatAccounts 返回一个渠道的脱敏账号列表。
 func (s *Store) ListChatAccounts(ctx context.Context, targetID string) ([]ChatAccount, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT target_id, external_id, display_name, provider, email, type, status,
-		status_text, quota, restore_at, success, fail, observed_at
+		status_text, quota, quota_state, quota_windows_json, subscription_expires_at, restore_at, success, fail, observed_at
 		FROM chat_accounts WHERE target_id = ? ORDER BY status, provider, display_name, email`, targetID)
 	if err != nil {
 		return nil, err
@@ -113,11 +120,15 @@ func (s *Store) ListChatAccounts(ctx context.Context, targetID string) ([]ChatAc
 	accounts := make([]ChatAccount, 0)
 	for rows.Next() {
 		var account ChatAccount
-		var observedAt string
+		var observedAt, quotaWindowsJSON string
 		if err := rows.Scan(&account.TargetID, &account.ExternalID, &account.DisplayName, &account.Provider,
 			&account.Email, &account.Type, &account.Status, &account.StatusText, &account.Quota,
+			&account.QuotaState, &quotaWindowsJSON, &account.SubscriptionExpiresAt,
 			&account.RestoreAt, &account.Success, &account.Fail, &observedAt); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(quotaWindowsJSON), &account.QuotaWindows); err != nil {
+			return nil, fmt.Errorf("解析账号额度失败: %w", err)
 		}
 		account.ObservedAt = parseTime(observedAt)
 		accounts = append(accounts, account)
@@ -232,7 +243,9 @@ func (s *Store) ListUnnotifiedAlerts(ctx context.Context, limit int) ([]AlertWit
 	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.target_id, a.type, a.metric_key, a.state, a.title, a.message,
 		a.current_value, a.threshold_value, a.unit, a.opened_at, a.recovered_at, a.last_notified_at, t.name
 		FROM alerts a JOIN targets t ON t.id = a.target_id
-		WHERE a.last_notified_at IS NULL ORDER BY a.opened_at ASC LIMIT ?`, limit)
+		WHERE a.last_notified_at IS NULL
+			AND (a.state IN ('open', 'acknowledged') OR a.type = 'recovered')
+		ORDER BY a.opened_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

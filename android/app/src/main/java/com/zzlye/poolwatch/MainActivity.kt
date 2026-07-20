@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -87,17 +88,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
-import com.zzlye.poolwatch.config.AppSettings
-import com.zzlye.poolwatch.config.MonitorStatus
-import com.zzlye.poolwatch.config.ServerUrlValidator
 import com.zzlye.poolwatch.auth.ChannelAuthActivity
 import com.zzlye.poolwatch.auth.ChannelAuthSecurity
+import com.zzlye.poolwatch.config.AppSettings
+import com.zzlye.poolwatch.config.BackgroundRunSettingsPolicy
+import com.zzlye.poolwatch.config.MonitorStatus
+import com.zzlye.poolwatch.config.ServerUrlValidator
+import com.zzlye.poolwatch.monitoring.AuthenticationPolicy
 import com.zzlye.poolwatch.monitoring.MonitoringScheduler
 import com.zzlye.poolwatch.monitoring.NotificationHelper
 import com.zzlye.poolwatch.monitoring.RealtimeMonitorService
 import com.zzlye.poolwatch.monitoring.SeenAlertStore
-import com.zzlye.poolwatch.ui.drawerGesturesEnabled
+import com.zzlye.poolwatch.monitoring.WebSessionChange
+import com.zzlye.poolwatch.network.SessionCookiePolicy
 import com.zzlye.poolwatch.ui.PoolWatchTheme
+import com.zzlye.poolwatch.ui.drawerGesturesEnabled
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -151,6 +156,9 @@ private fun PoolWatchApp(
     var recreateSignal by remember { mutableIntStateOf(0) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var pendingTestNotification by remember { mutableStateOf(false) }
+    var batteryOptimizationIgnored by remember {
+        mutableStateOf(isBatteryOptimizationIgnored(context))
+    }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -161,6 +169,11 @@ private fun PoolWatchApp(
             scope.launch { snackbar.showSnackbar("通知权限未开启，请在系统设置中允许通知") }
         }
         pendingTestNotification = false
+    }
+    val systemSettingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        batteryOptimizationIgnored = isBatteryOptimizationIgnored(context)
     }
 
     DisposableEffect(Unit) {
@@ -190,21 +203,33 @@ private fun PoolWatchApp(
         }
     }
 
-    LaunchedEffect(monitoringEnabled, monitorStatus, serverUrl) {
+    LaunchedEffect(monitoringEnabled, serverUrl) {
         if (!monitoringEnabled) return@LaunchedEffect
         // 网页登录和退出均由前端请求完成，不一定触发整页跳转，因此观察会话变化并同步原生监听。
-        val previousSession = sessionCookieValue(serverUrl)
+        var previousSession = sessionCookieValue(serverUrl)
         while (true) {
             delay(3_000)
             val currentSession = sessionCookieValue(serverUrl)
-            val loggedInAgain = monitorStatus == MonitorStatus.LOGIN_REQUIRED &&
-                currentSession != null && currentSession != previousSession
-            val loggedOut = monitorStatus != MonitorStatus.LOGIN_REQUIRED &&
-                previousSession != null && currentSession == null
-            if (loggedInAgain || loggedOut) {
-                MonitoringScheduler.reconnect(context)
-                break
+            when (
+                AuthenticationPolicy.detectWebSessionChange(
+                    previousSession = previousSession,
+                    currentSession = currentSession,
+                    authenticationInvalidated = settings.authenticationInvalidated,
+                )
+            ) {
+                WebSessionChange.LOGGED_IN -> {
+                    settings.markAuthenticationRefreshed()
+                    settings.monitorStatus = MonitorStatus.CONNECTING.value
+                    monitorStatus = MonitorStatus.CONNECTING
+                    MonitoringScheduler.reconnect(context)
+                }
+                WebSessionChange.LOGGED_OUT -> {
+                    monitorStatus = MonitorStatus.LOGIN_REQUIRED
+                    MonitoringScheduler.reportAuthenticationInvalid(context)
+                }
+                WebSessionChange.NONE -> Unit
             }
+            previousSession = currentSession
         }
     }
 
@@ -234,6 +259,7 @@ private fun PoolWatchApp(
                     onServerDraftChange = { serverDraft = it },
                     monitoringEnabled = monitoringEnabled,
                     monitorStatus = monitorStatus,
+                    batteryOptimizationIgnored = batteryOptimizationIgnored,
                     onMonitoringChange = { enabled ->
                         monitoringEnabled = enabled
                         if (enabled) {
@@ -296,7 +322,12 @@ private fun PoolWatchApp(
                         }
                     },
                     onOpenNotificationSettings = { openNotificationSettings(context) },
-                    onOpenBatterySettings = { openBatteryOptimizationSettings(context) },
+                    onOpenBatterySettings = {
+                        openBatteryOptimizationSettings(context, systemSettingsLauncher::launch)
+                    },
+                    onOpenBackgroundSettings = {
+                        openBackgroundRunSettings(context, systemSettingsLauncher::launch)
+                    },
                     onReconnect = {
                         MonitoringScheduler.reconnect(context)
                         monitorStatus = MonitorStatus.CONNECTING
@@ -354,10 +385,6 @@ private fun PoolWatchApp(
                             onAlertOpened()
                         }
                     },
-                    onAuthenticatedPageLoaded = {
-                        CookieManager.getInstance().flush()
-                        if (monitoringEnabled) MonitoringScheduler.reconnect(context)
-                    },
                 )
             }
         }
@@ -370,11 +397,13 @@ private fun NativeSettingsPanel(
     onServerDraftChange: (String) -> Unit,
     monitoringEnabled: Boolean,
     monitorStatus: MonitorStatus,
+    batteryOptimizationIgnored: Boolean,
     onMonitoringChange: (Boolean) -> Unit,
     onSaveServer: () -> Unit,
     onTestNotification: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
     onOpenBatterySettings: () -> Unit,
+    onOpenBackgroundSettings: () -> Unit,
     onReconnect: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -460,7 +489,25 @@ private fun NativeSettingsPanel(
             Text("设置忽略电池优化")
         }
         Text(
-            "部分手机还需要在系统管家中允许自启动和后台运行。强行停止应用后，需要再次打开应用才能恢复。",
+            if (batteryOptimizationIgnored) {
+                "电池优化：已允许持续后台运行"
+            } else {
+                "电池优化：系统可能限制后台监听"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (batteryOptimizationIgnored) {
+                Color(0xFF177A4A)
+            } else {
+                Color(0xFFB7770B)
+            },
+        )
+        OutlinedButton(onClick = onOpenBackgroundSettings, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Settings, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("打开自启动与后台设置")
+        }
+        Text(
+            "后台进程被系统回收后，周期检查会补拉告警，并在系统允许时恢复实时监听。部分手机仍需在系统管家中允许自启动和后台运行；强行停止应用后，需要再次打开应用。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -480,7 +527,6 @@ private fun PoolWatchWebView(
     reloadSignal: Int,
     modifier: Modifier = Modifier,
     onWebViewReady: (WebView) -> Unit,
-    onAuthenticatedPageLoaded: () -> Unit,
 ) {
     val context = LocalContext.current
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -546,7 +592,6 @@ private fun PoolWatchWebView(
                         override fun onPageFinished(view: WebView, url: String?) {
                             loading = false
                             CookieManager.getInstance().flush()
-                            onAuthenticatedPageLoaded()
                         }
 
                         override fun onReceivedError(
@@ -657,15 +702,9 @@ private fun requestNotificationPermissionIfNeeded(
     return false
 }
 
-private fun sessionCookieValue(serverUrl: String): String? = CookieManager.getInstance()
-    .getCookie(serverUrl)
-    .orEmpty()
-    .split(';')
-    .asSequence()
-    .map(String::trim)
-    .firstOrNull { it.startsWith("poolwatch_session=") }
-    ?.substringAfter('=')
-    ?.takeIf(String::isNotBlank)
+private fun sessionCookieValue(serverUrl: String): String? = SessionCookiePolicy.sessionValue(
+    CookieManager.getInstance().getCookie(serverUrl),
+)
 
 private fun openNotificationSettings(context: Context) {
     context.startActivity(
@@ -675,7 +714,7 @@ private fun openNotificationSettings(context: Context) {
 }
 
 @SuppressLint("BatteryLife")
-private fun openBatteryOptimizationSettings(context: Context) {
+private fun openBatteryOptimizationSettings(context: Context, launch: (Intent) -> Unit) {
     val powerManager = context.getSystemService(PowerManager::class.java)
     val intent = if (powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
         Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
@@ -685,8 +724,34 @@ private fun openBatteryOptimizationSettings(context: Context) {
             "package:${context.packageName}".toUri(),
         )
     }
-    runCatching { context.startActivity(intent) }
-        .onFailure { context.startActivity(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)) }
+    runCatching { launch(intent) }
+        .onFailure { launch(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)) }
+}
+
+private fun isBatteryOptimizationIgnored(context: Context): Boolean =
+    context.getSystemService(PowerManager::class.java)
+        .isIgnoringBatteryOptimizations(context.packageName)
+
+private fun openBackgroundRunSettings(context: Context, launch: (Intent) -> Unit) {
+    val opened = BackgroundRunSettingsPolicy.tryCandidates(
+        BackgroundRunSettingsPolicy.componentCandidates(Build.MANUFACTURER.orEmpty()),
+    ) { candidate ->
+        // Android 11 的包可见性会让预查询结果不可靠，因此直接逐个尝试显式入口。
+        launch(
+            Intent().setComponent(
+                ComponentName(candidate.packageName, candidate.className),
+            ),
+        )
+    }
+    if (opened) return
+
+    // 所有厂商入口均不可用时回到本应用详情页，用户仍可手动调整后台权限。
+    launch(
+        Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            "package:${context.packageName}".toUri(),
+        ),
+    )
 }
 
 @Composable

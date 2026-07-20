@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Search } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { formatDateTime } from '../lib/format'
 import type { SanitizedAccount, TargetStatus } from '../types'
 import { EmptyState } from './Common'
@@ -64,6 +64,76 @@ function formatCounter(value?: number): string {
   return value === undefined ? '—' : value.toLocaleString('zh-CN')
 }
 
+const visibleQuotaWindowCount = 2
+
+function quotaPercent(value?: string): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return undefined
+  return Math.min(100, Math.max(0, parsed))
+}
+
+function formatQuotaPercent(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value)
+}
+
+function quotaProgressTone(value: number): string {
+  if (value <= 20) return 'low'
+  if (value <= 50) return 'medium'
+  return 'high'
+}
+
+function QuotaWindowView({ window }: { window: NonNullable<SanitizedAccount['quotaWindows']>[number] }) {
+  const percent = quotaPercent(window.remainingPercent)
+  const label = window.label.trim() || '额度'
+  return (
+    <li className="account-quota-window">
+      <div className="account-quota-heading">
+        <span title={label}>{label}</span>
+        <strong>{percent === undefined ? '剩余比例未知' : `${formatQuotaPercent(percent)}%`}</strong>
+      </div>
+      {percent === undefined ? null : <progress className={`account-quota-progress ${quotaProgressTone(percent)}`} max={100} value={percent} aria-label={`${label}剩余 ${formatQuotaPercent(percent)}%`} />}
+      <small>{window.resetAt ? `重置：${formatDateTime(window.resetAt)}` : '重置时间未知'}</small>
+    </li>
+  )
+}
+
+function AccountQuotaView({ account }: { account: SanitizedAccount }) {
+  const windows = account.quotaWindows ?? []
+  // 兼容尚未返回 quotaState 的旧服务端：存在窗口时视为已获取，否则显示暂未获取。
+  const state = account.quotaState ?? (windows.length ? 'available' : 'unavailable')
+  const visibleWindows = windows.slice(0, visibleQuotaWindowCount)
+  const hiddenWindows = windows.slice(visibleQuotaWindowCount)
+  let content: ReactNode
+
+  if (state === 'unsupported') {
+    content = <div className="account-quota-state unsupported"><strong>不支持</strong><small>此提供商暂不支持额度读取</small></div>
+  } else if (state === 'unavailable') {
+    content = <div className="account-quota-state unavailable"><strong>暂未获取</strong><small>本次检测未读到额度</small></div>
+  } else if (!windows.length) {
+    content = <div className="account-quota-state available"><strong>已获取</strong><small>暂无额度窗口</small></div>
+  } else {
+    content = (
+      <>
+        <ul className="account-quota-list">{visibleWindows.map((window) => <QuotaWindowView key={window.key} window={window} />)}</ul>
+        {hiddenWindows.length ? (
+          <details className="account-quota-more">
+            <summary>查看另外 {hiddenWindows.length} 项额度</summary>
+            <ul className="account-quota-list">{hiddenWindows.map((window) => <QuotaWindowView key={window.key} window={window} />)}</ul>
+          </details>
+        ) : null}
+      </>
+    )
+  }
+
+  return (
+    <div className="account-quota">
+      {content}
+      {account.subscriptionExpiresAt ? <p className="account-quota-expiry">订阅到期：{formatDateTime(account.subscriptionExpiresAt)}</p> : null}
+    </div>
+  )
+}
+
 export function CLIProxyAccountPoolView({ accounts }: { accounts: SanitizedAccount[] }) {
   const [search, setSearch] = useState('')
   const [provider, setProvider] = useState('all')
@@ -126,13 +196,14 @@ export function CLIProxyAccountPoolView({ accounts }: { accounts: SanitizedAccou
       {pagedAccounts.length ? (
         <div className="table-wrap cliproxy-account-table-wrap">
           <table className="cliproxy-account-table">
-            <thead><tr><th scope="col">账号</th><th scope="col">提供商</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">恢复时间</th></tr></thead>
+            <thead><tr><th scope="col">账号</th><th scope="col">提供商</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">额度</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">恢复时间</th></tr></thead>
             <tbody>{pagedAccounts.map((account) => (
               <tr key={account.id}>
                 <td data-label="账号"><strong>{accountTitle(account)}</strong>{account.displayName && account.email ? <small>{account.email}</small> : null}</td>
                 <td data-label="提供商">{account.provider || '—'}</td>
                 <td data-label="类型">{account.type || '—'}</td>
                 <td data-label="状态"><StatusPill status={account.status} label={account.statusText || statusLabels[account.status]} /></td>
+                <td data-label="额度"><AccountQuotaView account={account} /></td>
                 <td data-label="成功">{formatCounter(account.success)}</td>
                 <td data-label="失败">{formatCounter(account.fail)}</td>
                 <td data-label="恢复时间">{account.recoveryAt ? formatDateTime(account.recoveryAt) : '—'}</td>

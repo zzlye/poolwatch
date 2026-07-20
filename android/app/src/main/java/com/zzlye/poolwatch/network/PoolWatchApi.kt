@@ -24,11 +24,7 @@ class PoolWatchApi(
         .addInterceptor(cookieInterceptor)
         .build()
 
-    val eventClient: OkHttpClient = httpClient.newBuilder()
-        // SSE 依靠服务端心跳保持连接，读取本身不设置总超时。
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .callTimeout(0, TimeUnit.MILLISECONDS)
-        .build()
+    val eventClient: OkHttpClient = buildEventClient(httpClient.newBuilder())
 
     fun endpoint(path: String): HttpUrl {
         val base = settings.serverUrl.trimEnd('/').toHttpUrl()
@@ -53,6 +49,16 @@ class PoolWatchApi(
                 }
             }
         }
+    }
+
+    companion object {
+        const val EVENT_READ_TIMEOUT_SECONDS = 75L
+
+        internal fun buildEventClient(builder: OkHttpClient.Builder): OkHttpClient = builder
+            // 服务端每二十五秒发送心跳，连续三次没有任何数据时重建静默连接。
+            .readTimeout(EVENT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
     }
 }
 

@@ -207,10 +207,13 @@ func (s *Store) RefreshTargetMonitoringConfig(ctx context.Context, id string, re
 }
 
 func refreshTargetMonitoringConfigTx(ctx context.Context, tx *sql.Tx, id string, removedMetricKeys []string, updatedAt time.Time) error {
+	resolvedAt := formatTime(updatedAt)
 	for _, metricKey := range removedMetricKeys {
-		if _, err := tx.ExecContext(ctx, `UPDATE alerts SET state = 'resolved', recovered_at = ?
+		// 配置关闭告警后，旧事件不再代表需要推送的风险，同时保留已经成功通知过的时间。
+		if _, err := tx.ExecContext(ctx, `UPDATE alerts SET state = 'resolved', recovered_at = ?,
+			last_notified_at = COALESCE(last_notified_at, ?)
 			WHERE target_id = ? AND type = 'threshold' AND metric_key = ? AND state IN ('open', 'acknowledged')`,
-			formatTime(updatedAt), id, metricKey); err != nil {
+			resolvedAt, resolvedAt, id, metricKey); err != nil {
 			return fmt.Errorf("清理已取消指标告警失败: %w", err)
 		}
 	}

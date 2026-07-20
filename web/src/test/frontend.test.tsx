@@ -8,13 +8,14 @@ import SettingsPage from '../pages/SettingsPage'
 import TargetWizardPage, { parseSub2APIOAuthCallback, targetToDraft } from '../pages/TargetWizardPage'
 import TargetDetailPage from '../pages/TargetDetailPage'
 import { AppShell } from '../components/AppShell'
+import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
 import { ThemeProvider, useTheme } from '../hooks/useTheme'
 import { useRealtime } from '../hooks/useRealtime'
 import { api } from '../api/client'
 import { enablePush } from '../lib/push'
-import type { Settings, Snapshot, Target } from '../types'
+import type { SanitizedAccount, Settings, Snapshot, Target } from '../types'
 
 function createQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
@@ -254,6 +255,80 @@ describe('渠道向导', () => {
     })
   })
 
+  it('New API 旧地址的延迟任务返回后不会覆盖新地址任务', async () => {
+    const oldAttempt = {
+      id: 'auth_delayed_old_0123456789abcdef',
+      status: 'waiting' as const,
+      loginUrl: 'https://old.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    const newAttempt = {
+      id: 'auth_current_new_0123456789abcdef',
+      status: 'waiting' as const,
+      loginUrl: 'https://new.example.com/login',
+      expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    let resolveOldAttempt: ((value: typeof oldAttempt) => void) | undefined
+    const delayedOldAttempt = new Promise<typeof oldAttempt>((resolve) => { resolveOldAttempt = resolve })
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt')
+      .mockImplementationOnce(() => delayedOldAttempt)
+      .mockResolvedValueOnce(newAttempt)
+    vi.spyOn(api, 'targetAuthAttempt').mockResolvedValue(newAttempt)
+    const postMessage = vi.spyOn(window, 'postMessage')
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const announceHelperReady = () => {
+      act(() => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: window,
+          origin: window.location.origin,
+          data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+        }))
+      })
+    }
+
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '延迟任务渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://old.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    await screen.findByRole('button', { name: '启用一键读取' })
+    announceHelperReady()
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+    await waitFor(() => expect(createAttempt).toHaveBeenNthCalledWith(1, {
+      kind: 'new_api',
+      baseUrl: 'https://old.example.com'
+    }))
+
+    fireEvent.click(screen.getByRole('button', { name: '上一步' }))
+    fireEvent.change(await screen.findByLabelText(/站点地址/), { target: { value: 'https://new.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    await screen.findByRole('button', { name: '启用一键读取' })
+    announceHelperReady()
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+    await waitFor(() => expect(createAttempt).toHaveBeenNthCalledWith(2, {
+      kind: 'new_api',
+      baseUrl: 'https://new.example.com'
+    }))
+    await waitFor(() => expect(postMessage.mock.calls.some(([message]) => (
+      message?.type === 'POOLWATCH_IMPORT_NEW_API' && message.attemptId === newAttempt.id
+    ))).toBe(true))
+
+    await act(async () => {
+      resolveOldAttempt?.(oldAttempt)
+      await delayedOldAttempt
+      await Promise.resolve()
+    })
+
+    expect(postMessage.mock.calls.some(([message]) => (
+      message?.type === 'POOLWATCH_IMPORT_NEW_API' && message.attemptId === oldAttempt.id
+    ))).toBe(false)
+    fireEvent.click(await screen.findByRole('button', { name: '打开渠道站点' }))
+    expect(open).toHaveBeenCalledWith(newAttempt.loginUrl, '_blank', 'noopener,noreferrer')
+  })
+
   it('Sub2API OAuth 回调只解析同源 fragment 且不保留完整地址', () => {
     expect(parseSub2APIOAuthCallback(
       'https://sub.example.com/oauth/callback#access_token=access%2Evalue&refresh_token=refresh%2Bvalue',
@@ -312,17 +387,21 @@ describe('渠道向导', () => {
 
     expect(screen.getAllByLabelText('告警条件').map((element) => (element as HTMLSelectElement).value)).toEqual(['lte', 'gte', 'gte'])
     expect(screen.getAllByLabelText('告警阈值').map((element) => (element as HTMLInputElement).value)).toEqual(['0', '1', '1'])
-    expect(screen.getByText('healthy_accounts')).toBeInTheDocument()
-    expect(screen.getByText('limited_accounts')).toBeInTheDocument()
-    expect(screen.getByText('error_accounts')).toBeInTheDocument()
+    expect(screen.getByLabelText('可用账号告警').parentElement).toHaveTextContent('healthy_accounts')
+    expect(screen.getByLabelText('限流账号告警').parentElement).toHaveTextContent('limited_accounts')
+    expect(screen.getByLabelText('异常账号告警').parentElement).toHaveTextContent('error_accounts')
     expect(screen.queryByText('disabled_accounts')).not.toBeInTheDocument()
+    const limitedAlertToggle = screen.getByRole('checkbox', { name: '限流账号告警' })
+    fireEvent.click(limitedAlertToggle)
+    expect(limitedAlertToggle).not.toBeChecked()
+    expect(screen.getByText('limited_accounts · 仅展示，不告警')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     fireEvent.click(screen.getByRole('button', { name: '添加渠道' }))
     await waitFor(() => expect(create).toHaveBeenCalledOnce())
     expect(create.mock.calls[0][0].thresholds).toEqual([
       expect.objectContaining({ key: 'healthy_accounts', comparison: 'lte' }),
-      expect.objectContaining({ key: 'limited_accounts', comparison: 'gte' }),
+      expect.objectContaining({ key: 'limited_accounts', comparison: 'gte', alertEnabled: false }),
       expect.objectContaining({ key: 'error_accounts', comparison: 'gte' })
     ])
     create.mockRestore()
@@ -361,6 +440,72 @@ describe('渠道向导', () => {
     expect(draft.thresholds[0].comparison).toBe('lte')
   })
 
+  it('编辑内置渠道时保留额外已配置指标并忽略纯采集指标', () => {
+    const target: Target = {
+      id: 'cli-edit-1',
+      name: '代理号池',
+      kind: 'cliproxyapi',
+      baseUrl: 'https://proxy.example.com',
+      status: 'healthy',
+      statusText: '运行正常',
+      enabled: true,
+      checkIntervalMinutes: 5,
+      authConfigured: true,
+      metrics: [
+        { key: 'healthy_accounts', label: '正常账号', value: '8', unit: '个', threshold: '0', comparison: 'lte', alertEnabled: true, status: 'healthy' },
+        { key: 'limited_accounts', label: '限流账号', value: '0', unit: '个', threshold: '1', comparison: 'gte', alertEnabled: true, status: 'healthy' },
+        { key: 'error_accounts', label: '异常账号', value: '0', unit: '个', threshold: '1', comparison: 'gte', alertEnabled: true, status: 'healthy' },
+        { key: 'account_total', label: '账号总数', value: '8', unit: '个', alertThreshold: '10', comparison: 'lte', alertEnabled: false, status: 'healthy' },
+        { key: 'disabled_accounts', label: '禁用账号', value: '0', unit: '个', threshold: '1', comparison: 'gte', alertEnabled: true, status: 'healthy' },
+        { key: 'wallet_balance', label: '只读展示指标', value: '88', unit: '点', alertEnabled: false, status: 'healthy' }
+      ]
+    }
+
+    const draft = targetToDraft(target)
+    expect(draft.thresholds.map((item) => item.key)).toEqual([
+      'healthy_accounts', 'limited_accounts', 'error_accounts', 'account_total', 'disabled_accounts'
+    ])
+    expect(draft.thresholds.find((item) => item.key === 'account_total')).toEqual(expect.objectContaining({
+      value: '10', comparison: 'lte', alertEnabled: false
+    }))
+    expect(draft.thresholds.find((item) => item.key === 'disabled_accounts')).toEqual(expect.objectContaining({
+      value: '1', comparison: 'gte', alertEnabled: true
+    }))
+  })
+
+  it('自定义 HTTP 指标可关闭告警并继续保存采集配置', async () => {
+    const create = vi.spyOn(api, 'createTarget').mockResolvedValue({
+      id: 'custom-no-alert', name: '只采集自定义额度', kind: 'custom', baseUrl: 'https://custom.example.com/status',
+      status: 'unknown', statusText: '等待检测', enabled: true, checkIntervalMinutes: 5, authConfigured: false,
+      requestMethod: 'GET', jsonPointer: '/data/balance', metrics: [{ key: 'wallet_balance', label: '自定义指标', value: '88', unit: '个', status: 'unknown' }]
+    })
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '只采集自定义额度' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'custom' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://custom.example.com/status' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    const alertToggle = screen.getByRole('checkbox', { name: '自定义指标告警' })
+    fireEvent.change(screen.getByLabelText('告警阈值'), { target: { value: '' } })
+    fireEvent.click(alertToggle)
+    expect(alertToggle).not.toBeChecked()
+    expect(screen.getByText('仅展示，不告警')).toBeInTheDocument()
+    expect(screen.getByLabelText('告警条件')).toBeDisabled()
+    expect(screen.getByLabelText('告警阈值')).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    expect(screen.getByRole('heading', { name: '检测与保存' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '添加渠道' }))
+    await waitFor(() => expect(create).toHaveBeenCalledOnce())
+    expect(create.mock.calls[0][0].thresholds[0]).toEqual(expect.objectContaining({ alertEnabled: false }))
+  })
+
   it('可以关闭 New API 订阅监控且保留零阈值语义', async () => {
     const create = vi.spyOn(api, 'createTarget').mockResolvedValue({
       id: 'new-api-1',
@@ -387,9 +532,14 @@ describe('渠道向导', () => {
     const subscriptionToggle = screen.getByRole('checkbox', { name: /监控订阅额度/ })
     expect(subscriptionToggle).not.toBeChecked()
     fireEvent.click(subscriptionToggle)
-    expect(screen.getByText('subscription_balance')).toBeInTheDocument()
+    expect(screen.getByLabelText('订阅余额告警').parentElement).toHaveTextContent('subscription_balance')
+    const subscriptionAlertToggle = screen.getByLabelText('订阅余额告警')
+    fireEvent.click(subscriptionAlertToggle)
+    expect(subscriptionToggle).toBeChecked()
+    expect(subscriptionAlertToggle).not.toBeChecked()
+    expect(subscriptionAlertToggle.parentElement).toHaveTextContent('仅展示，不告警')
     fireEvent.click(subscriptionToggle)
-    expect(screen.queryByText('subscription_balance')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('订阅余额告警')).not.toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('告警阈值'), { target: { value: '0' } })
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
     fireEvent.click(screen.getByRole('button', { name: '添加渠道' }))
@@ -475,6 +625,48 @@ describe('状态和趋势', () => {
     expect(screen.getByText('达到告警条件')).toBeInTheDocument()
     target.mockRestore()
     history.mockRestore()
+  })
+})
+
+describe('CLIProxyAPI 账号额度', () => {
+  it('分别展示真实百分比、暂未获取和提供商不支持状态', () => {
+    const accounts: SanitizedAccount[] = [
+      {
+        id: 'quota-ready', displayName: '额度账号', provider: 'Codex', type: 'Plus', status: 'healthy',
+        quotaState: 'available', subscriptionExpiresAt: '2026-08-20T08:00:00Z',
+        quotaWindows: [{ key: 'five-hour', label: '5 小时额度', remainingPercent: '68.5', resetAt: '2026-07-20T10:00:00Z' }]
+      },
+      { id: 'quota-unavailable', displayName: '未获取账号', provider: 'Gemini', status: 'healthy', quotaState: 'unavailable' },
+      { id: 'quota-unsupported', displayName: '不支持账号', provider: 'Anthropic', status: 'healthy', quotaState: 'unsupported' }
+    ]
+
+    render(<CLIProxyAccountPoolView accounts={accounts} />)
+
+    expect(screen.getByRole('columnheader', { name: '额度' })).toBeInTheDocument()
+    expect(screen.getByText('68.5%')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '5 小时额度剩余 68.5%' })).toHaveValue(68.5)
+    expect(screen.getByText(/^重置：/)).toBeInTheDocument()
+    expect(screen.getByText(/^订阅到期：/)).toBeInTheDocument()
+    expect(screen.getByText('暂未获取')).toBeInTheDocument()
+    expect(screen.getByText('本次检测未读到额度')).toBeInTheDocument()
+    expect(screen.getByText('不支持')).toBeInTheDocument()
+    expect(screen.getByText('此提供商暂不支持额度读取')).toBeInTheDocument()
+  })
+
+  it('旧数据和缺少百分比的额度窗口提供明确说明', () => {
+    const accounts: SanitizedAccount[] = [
+      { id: 'legacy', displayName: '旧账号', status: 'unknown' },
+      {
+        id: 'reset-only', displayName: '仅重置时间账号', provider: 'Codex', status: 'healthy', quotaState: 'available',
+        quotaWindows: [{ key: 'weekly', label: '每周额度', resetAt: '2026-07-27T08:00:00Z' }]
+      }
+    ]
+
+    render(<CLIProxyAccountPoolView accounts={accounts} />)
+
+    expect(screen.getByText('暂未获取')).toBeInTheDocument()
+    expect(screen.getByText('剩余比例未知')).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
   })
 })
 

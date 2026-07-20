@@ -22,9 +22,22 @@ type flakyNotifier struct {
 	attempts int
 }
 
+type failingSequenceNotifier struct {
+	items     []Notification
+	failUntil int
+}
+
 func (notifier *flakyNotifier) Notify(_ context.Context, _ Notification) error {
 	notifier.attempts++
 	if notifier.attempts == 1 {
+		return errors.New("临时推送失败")
+	}
+	return nil
+}
+
+func (notifier *failingSequenceNotifier) Notify(_ context.Context, notification Notification) error {
+	notifier.items = append(notifier.items, notification)
+	if len(notifier.items) <= notifier.failUntil {
 		return errors.New("临时推送失败")
 	}
 	return nil
@@ -234,12 +247,18 @@ func TestCLIProxyAccountsAreHashedAndSanitized(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database, nil)
 	rawID := "upstream-account-secret-id"
+	remaining := decimal.RequireFromString("42.5")
 	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
 		TargetID: target.ID, Kind: monitor.TargetKindCLIProxyAPI, ObservedAt: time.Now().UTC(),
 		Accounts: []monitor.AccountStatus{{
 			ExternalID: rawID, DisplayName: "主账号", Provider: "codex", Email: "private@example.com",
 			Type: "plus", Status: string(monitor.TargetStatusWarning), StatusText: "额度冷却中",
-			RecoveryAt: "2026-07-21T00:00:00Z", Success: 12, Fail: 3,
+			QuotaState: monitor.AccountQuotaStateAvailable,
+			QuotaWindows: []monitor.AccountQuotaWindow{{
+				Key: "code-5h", Label: "5 小时", RemainingPercent: &remaining, ResetAt: "2026-07-20T09:00:00Z",
+			}},
+			SubscriptionExpiresAt: "2026-08-20T08:00:00Z",
+			RecoveryAt:            "2026-07-21T00:00:00Z", Success: 12, Fail: 3,
 		}},
 	}); err != nil {
 		t.Fatalf("保存 CLIProxyAPI 账号失败: %v", err)
@@ -255,12 +274,25 @@ func TestCLIProxyAccountsAreHashedAndSanitized(t *testing.T) {
 	if account.DisplayName != "主账号" || account.Provider != "codex" || account.StatusText != "额度冷却中" || account.Success != 12 || account.Fail != 3 {
 		t.Fatalf("安全账号字段保存不完整：%#v", account)
 	}
+	if account.QuotaState != monitor.AccountQuotaStateAvailable || account.SubscriptionExpiresAt != "2026-08-20T08:00:00Z" ||
+		len(account.QuotaWindows) != 1 || account.QuotaWindows[0].Key != "code-5h" ||
+		account.QuotaWindows[0].RemainingPercent != "42.5" || account.QuotaWindows[0].ResetAt != "2026-07-20T09:00:00Z" {
+		t.Fatalf("账号额度字段保存不完整：%#v", account)
+	}
 }
 
 func TestCLIProxyAccountLabelMasksEmailAndDropsSecrets(t *testing.T) {
+	invalidRemaining := decimal.NewFromInt(150)
 	accounts := sanitizedAccounts(string(monitor.TargetKindCLIProxyAPI), "target_cli", []monitor.AccountStatus{
 		{ExternalID: "email-label", DisplayName: "user@example.com", Status: string(monitor.TargetStatusHealthy)},
-		{ExternalID: "secret-label", DisplayName: "sk-abcdefghijklmnopqrstuvwxyz0123456789", Status: string(monitor.TargetStatusHealthy)},
+		{
+			ExternalID: "secret-label", DisplayName: "sk-abcdefghijklmnopqrstuvwxyz0123456789",
+			Status: string(monitor.TargetStatusHealthy), QuotaState: "Bearer private-token",
+			SubscriptionExpiresAt: "client_secret_value",
+			QuotaWindows: []monitor.AccountQuotaWindow{{
+				Key: "bad key", Label: "Bearer private-token", RemainingPercent: &invalidRemaining, ResetAt: "not-a-time",
+			}},
+		},
 	}, time.Now().UTC())
 	if len(accounts) != 2 {
 		t.Fatalf("CLIProxyAPI 安全账号应被保留：%#v", accounts)
@@ -270,6 +302,9 @@ func TestCLIProxyAccountLabelMasksEmailAndDropsSecrets(t *testing.T) {
 	}
 	if accounts[1].DisplayName != "" {
 		t.Fatalf("疑似密钥的账号名称应清空：%#v", accounts[1])
+	}
+	if accounts[1].QuotaState != "" || len(accounts[1].QuotaWindows) != 0 || accounts[1].SubscriptionExpiresAt != "" {
+		t.Fatalf("非白名单额度字段不应保存：%#v", accounts[1])
 	}
 }
 
@@ -320,6 +355,73 @@ func TestFailedNotificationRemainsPendingUntilRetrySucceeds(t *testing.T) {
 	active, err = database.ActiveAlert(context.Background(), target.ID, string(monitor.AlertTypeQuotaLow), string(monitor.MetricWalletBalance))
 	if err != nil || active.LastNotifiedAt == nil || notifier.attempts != 2 {
 		t.Fatalf("通知重试状态不正确: %#v, 尝试=%d, 错误=%v", active, notifier.attempts, err)
+	}
+}
+
+func Test自然恢复后只重试恢复通知(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindNewAPI))
+	defer database.Close()
+	notifier := &failingSequenceNotifier{failUntil: 2}
+	engine := NewEngine(database, notifier)
+	threshold := decimal.NewFromInt(10)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	engine.now = func() time.Time { return now }
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindNewAPI, ObservedAt: now, Metrics: []monitor.Metric{{
+			Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(1), Unit: "元", Threshold: &threshold,
+		}},
+	}); err != nil {
+		t.Fatalf("创建待发送阈值告警失败: %v", err)
+	}
+	now = now.Add(time.Minute)
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindNewAPI, ObservedAt: now, Metrics: []monitor.Metric{{
+			Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(20), Unit: "元", Threshold: &threshold,
+		}},
+	}); err != nil {
+		t.Fatalf("恢复阈值告警失败: %v", err)
+	}
+	if len(notifier.items) != 2 || notifier.items[0].Recovered || !notifier.items[1].Recovered {
+		t.Fatalf("恢复前的通知顺序不正确: %#v", notifier.items)
+	}
+	if err := engine.RetryPending(context.Background(), 10); err != nil {
+		t.Fatalf("重试恢复通知失败: %v", err)
+	}
+	if len(notifier.items) != 3 || !notifier.items[2].Recovered {
+		t.Fatalf("自然恢复后不应重试旧告警: %#v", notifier.items)
+	}
+}
+
+func Test关闭指标后不再重试旧告警通知(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindNewAPI))
+	defer database.Close()
+	notifier := &flakyNotifier{}
+	engine := NewEngine(database, notifier)
+	threshold := decimal.NewFromInt(10)
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindNewAPI, ObservedAt: time.Now().UTC(), Metrics: []monitor.Metric{{
+			Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(1), Unit: "元", Threshold: &threshold,
+		}},
+	}); err != nil {
+		t.Fatalf("创建待重试告警失败: %v", err)
+	}
+	active, err := database.ActiveAlert(
+		context.Background(), target.ID, string(monitor.AlertTypeQuotaLow), string(monitor.MetricWalletBalance),
+	)
+	if err != nil || notifier.attempts != 1 {
+		t.Fatalf("准备待重试告警失败: %#v, 尝试=%d, 错误=%v", active, notifier.attempts, err)
+	}
+	if err := database.RefreshTargetMonitoringConfig(
+		context.Background(), target.ID, []string{string(monitor.MetricWalletBalance)}, time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("关闭指标告警失败: %v", err)
+	}
+	if err := engine.RetryPending(context.Background(), 10); err != nil {
+		t.Fatalf("检查待发送通知失败: %v", err)
+	}
+	resolved, err := database.AlertByID(context.Background(), active.ID)
+	if err != nil || resolved.State != "resolved" || resolved.LastNotifiedAt == nil || notifier.attempts != 1 {
+		t.Fatalf("关闭指标后仍重试了旧告警: %#v, 尝试=%d, 错误=%v", resolved, notifier.attempts, err)
 	}
 }
 
