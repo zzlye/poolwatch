@@ -39,6 +39,7 @@ type Dependencies struct {
 	Scheduler           *scheduler.Service
 	Push                *push.Service
 	Events              *events.Hub
+	AndroidUpdates      AndroidUpdateProvider
 	Static              http.Handler
 	PublicBaseURL       string
 	AllowPrivateTargets bool
@@ -53,6 +54,7 @@ type Server struct {
 	publicOrigin string
 	limiter      *attemptLimiter
 	targetAuth   *targetAuthAttemptStore
+	androidSlots chan struct{}
 }
 
 // NewServer 创建并注册全部路由。
@@ -64,6 +66,7 @@ func NewServer(dependencies Dependencies) *Server {
 		dependencies: dependencies,
 		limiter:      newAttemptLimiter(10, 10*time.Minute),
 		targetAuth:   newTargetAuthAttemptStore(dependencies.Vault),
+		androidSlots: make(chan struct{}, 4),
 	}
 	if parsed, err := url.Parse(dependencies.PublicBaseURL); err == nil && parsed.Host != "" {
 		server.secureCookie = parsed.Scheme == "https"
@@ -81,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /api/app/update/android", s.handleAndroidUpdate)
+	mux.HandleFunc("GET /api/app/update/android/apk", s.handleAndroidAPK)
 	mux.HandleFunc("GET /api/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /api/setup", s.handleSetup)
 	mux.HandleFunc("POST /api/session", s.handleLogin)

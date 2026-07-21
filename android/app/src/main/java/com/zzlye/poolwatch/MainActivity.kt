@@ -78,6 +78,8 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -103,6 +105,13 @@ import com.zzlye.poolwatch.monitoring.WebSessionChange
 import com.zzlye.poolwatch.network.SessionCookiePolicy
 import com.zzlye.poolwatch.ui.PoolWatchTheme
 import com.zzlye.poolwatch.ui.drawerGesturesEnabled
+import com.zzlye.poolwatch.update.AppUpdateDialog
+import com.zzlye.poolwatch.update.AppUpdateInfo
+import com.zzlye.poolwatch.update.AppUpdateManager
+import com.zzlye.poolwatch.update.AppUpdateMetadataParser
+import com.zzlye.poolwatch.update.AppUpdateState
+import com.zzlye.poolwatch.update.AppUpdateStateCodec
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -143,6 +152,7 @@ private fun PoolWatchApp(
     val context = LocalContext.current
     val activity = context as Activity
     val settings = remember { AppSettings(context) }
+    val updateManager = remember { AppUpdateManager(context) }
     val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -156,6 +166,14 @@ private fun PoolWatchApp(
     var recreateSignal by remember { mutableIntStateOf(0) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var pendingTestNotification by remember { mutableStateOf(false) }
+    var updateState by rememberSaveable(
+        stateSaver = Saver<AppUpdateState, String>(
+            save = { state -> AppUpdateStateCodec.encode(state) },
+            restore = { AppUpdateStateCodec.decode(it) ?: AppUpdateState.Idle },
+        ),
+    ) { mutableStateOf<AppUpdateState>(AppUpdateState.Idle) }
+    var updateDialogVisible by rememberSaveable { mutableStateOf(false) }
+    var pendingInstallJson by rememberSaveable { mutableStateOf<String?>(null) }
     var batteryOptimizationIgnored by remember {
         mutableStateOf(isBatteryOptimizationIgnored(context))
     }
@@ -174,6 +192,108 @@ private fun PoolWatchApp(
         ActivityResultContracts.StartActivityForResult(),
     ) {
         batteryOptimizationIgnored = isBatteryOptimizationIgnored(context)
+    }
+    val installPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        val info = pendingInstallJson
+            ?.let { raw -> AppUpdateMetadataParser.parse(raw).getOrNull() }
+            ?: (updateState as? AppUpdateState.Ready)?.info
+            ?: return@rememberLauncherForActivityResult
+        if (!updateManager.canRequestPackageInstalls()) {
+            scope.launch { snackbar.showSnackbar("请允许号池监控安装更新") }
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            launchVerifiedInstaller(activity, updateManager, info)
+                .onSuccess { pendingInstallJson = null }
+                .onFailure { error ->
+                    updateState = AppUpdateState.Error(error.message ?: "打开系统安装器失败", info)
+                    updateDialogVisible = true
+                    snackbar.showSnackbar(error.message ?: "打开系统安装器失败")
+                }
+        }
+    }
+
+    suspend fun checkForUpdate(manual: Boolean): Boolean {
+        val previousState = updateState
+        updateState = AppUpdateState.Checking
+        val result = updateManager.checkLatest(BuildConfig.VERSION_CODE, serverUrl)
+        if (result.isFailure) {
+            val failure = result.exceptionOrNull()
+            if (failure is CancellationException) throw failure
+            val message = failure?.message ?: "检查更新失败，请稍后重试"
+            updateState = if (previousState == AppUpdateState.Idle || previousState == AppUpdateState.Latest) {
+                AppUpdateState.Error(message)
+            } else {
+                previousState
+            }
+            if (manual) snackbar.showSnackbar(message)
+            return false
+        }
+
+        val latest = result.getOrNull()
+        val stored = updateManager.storedDownload()
+        if (stored != null && (latest == null || !updateManager.sameArtifact(stored.info, latest))) {
+            // 服务端撤回旧版本或发布更高版本时，立即移除本地旧安装包。
+            updateManager.cancelStoredDownload(removeFile = true)
+        }
+        if (latest == null) {
+            updateState = AppUpdateState.Latest
+            updateDialogVisible = false
+            if (manual) snackbar.showSnackbar("当前已经是最新版本")
+            return true
+        }
+
+        if (stored != null && updateManager.sameArtifact(stored.info, latest)) {
+            updateState = updateManager.restoreStoredDownload(BuildConfig.VERSION_CODE)
+                ?: AppUpdateState.Available(latest)
+        } else {
+            updateState = AppUpdateState.Available(latest)
+        }
+        updateDialogVisible = true
+        return true
+    }
+
+    fun downloadUpdate(info: AppUpdateInfo) {
+        runCatching { updateManager.enqueue(info) }
+            .onSuccess { downloadId ->
+                updateState = AppUpdateState.Downloading(info, downloadId, null, 0L, -1L, null)
+                updateDialogVisible = true
+            }
+            .onFailure { error ->
+                val message = error.message ?: "创建更新下载失败"
+                updateState = AppUpdateState.Error(message, info)
+                updateDialogVisible = true
+                scope.launch { snackbar.showSnackbar(message) }
+            }
+    }
+
+    fun cancelUpdateDownload(info: AppUpdateInfo) {
+        updateManager.cancelStoredDownload(removeFile = true)
+        // 强制更新仍保留在提示框中，用户可以随时重新开始，不会被暂停状态卡住。
+        updateState = AppUpdateState.Available(info)
+        updateDialogVisible = true
+    }
+
+    fun installUpdate(info: AppUpdateInfo) {
+        pendingInstallJson = AppUpdateMetadataParser.toJson(info)
+        if (!updateManager.canRequestPackageInstalls()) {
+            runCatching { installPermissionLauncher.launch(updateManager.unknownSourcesSettingsIntent()) }
+                .onFailure {
+                    scope.launch { snackbar.showSnackbar("请在系统设置中允许安装未知应用") }
+                }
+            return
+        }
+        scope.launch {
+            launchVerifiedInstaller(activity, updateManager, info)
+                .onSuccess { pendingInstallJson = null }
+                .onFailure { error ->
+                    updateState = AppUpdateState.Error(error.message ?: "打开系统安装器失败", info)
+                    updateDialogVisible = true
+                    snackbar.showSnackbar(error.message ?: "打开系统安装器失败")
+                }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -200,6 +320,92 @@ private fun PoolWatchApp(
         if (monitoringEnabled) {
             MonitoringScheduler.schedulePeriodic(context)
             MonitoringScheduler.startRealtimeService(context)
+        }
+    }
+
+    LaunchedEffect(serverUrl) {
+        updateManager.restoreStoredDownload(BuildConfig.VERSION_CODE)?.let { restored ->
+            updateState = restored
+            val restoredInfo = when (restored) {
+                is AppUpdateState.Downloading -> restored.info
+                is AppUpdateState.Ready -> restored.info
+                is AppUpdateState.Error -> restored.info
+                else -> null
+            }
+            updateDialogVisible = restoredInfo?.mandatory == true ||
+                restored is AppUpdateState.Ready ||
+                (restored is AppUpdateState.Downloading && restored.pausedReason != null)
+        }
+
+        while (true) {
+            if (updateManager.beginAutomaticCheck(serverUrl)) {
+                var completed: Boolean? = null
+                try {
+                    completed = checkForUpdate(manual = false)
+                } finally {
+                    // Activity 重建导致协程取消时只释放占用，让新 Activity 立即补查。
+                    if (completed == null) {
+                        updateManager.cancelAutomaticCheck(serverUrl)
+                    } else {
+                        updateManager.finishAutomaticCheck(serverUrl, completed)
+                    }
+                }
+            }
+            val waitMillis = updateManager.delayUntilAutomaticCheck(serverUrl)
+                .coerceAtLeast(1_000L)
+            delay(waitMillis)
+        }
+    }
+
+    val activeDownload = updateState as? AppUpdateState.Downloading
+    LaunchedEffect(activeDownload?.downloadId) {
+        val initial = activeDownload ?: return@LaunchedEffect
+        while (true) {
+            delay(750)
+            val snapshot = updateManager.query(initial.downloadId)
+            if (snapshot.exceedsExpectedSize(initial.info.sizeBytes)) {
+                updateManager.cancelStoredDownload(removeFile = true)
+                updateState = AppUpdateState.Error("安装包超过允许大小，已取消下载", initial.info)
+                updateDialogVisible = true
+                break
+            }
+            when (snapshot.status) {
+                AppUpdateManager.DownloadStatus.PENDING,
+                AppUpdateManager.DownloadStatus.RUNNING,
+                AppUpdateManager.DownloadStatus.PAUSED,
+                -> updateState = initial.copy(
+                    progress = snapshot.progress,
+                    downloadedBytes = snapshot.downloadedBytes,
+                    totalBytes = snapshot.totalBytes,
+                    pausedReason = snapshot.reason.takeIf {
+                        snapshot.status == AppUpdateManager.DownloadStatus.PAUSED
+                    },
+                )
+                AppUpdateManager.DownloadStatus.SUCCESSFUL -> {
+                    updateManager.verify(initial.info).fold(
+                        onSuccess = {
+                            updateState = AppUpdateState.Ready(initial.info)
+                            updateDialogVisible = true
+                        },
+                        onFailure = { error ->
+                            updateState = AppUpdateState.Error(
+                                error.message ?: "安装包校验失败，请重新下载",
+                                initial.info,
+                            )
+                            updateDialogVisible = true
+                        },
+                    )
+                    break
+                }
+                AppUpdateManager.DownloadStatus.FAILED,
+                AppUpdateManager.DownloadStatus.UNKNOWN,
+                -> {
+                    updateManager.cancelStoredDownload(removeFile = true)
+                    updateState = AppUpdateState.Error("更新下载失败，请检查网络和存储空间", initial.info)
+                    updateDialogVisible = true
+                    break
+                }
+            }
         }
     }
 
@@ -332,6 +538,11 @@ private fun PoolWatchApp(
                         MonitoringScheduler.reconnect(context)
                         monitorStatus = MonitorStatus.CONNECTING
                     },
+                    updateState = updateState,
+                    onCheckUpdate = { scope.launch { checkForUpdate(manual = true) } },
+                    onDownloadUpdate = { info -> downloadUpdate(info) },
+                    onInstallUpdate = { info -> installUpdate(info) },
+                    onCancelDownload = { info -> cancelUpdateDownload(info) },
                     onClose = { scope.launch { drawerState.close() } },
                 )
             }
@@ -389,6 +600,26 @@ private fun PoolWatchApp(
             }
         }
     }
+
+    if (updateDialogVisible) {
+        AppUpdateDialog(
+            state = updateState,
+            onDismiss = { updateDialogVisible = false },
+            onDownload = {
+                (updateState as? AppUpdateState.Available)?.let { downloadUpdate(it.info) }
+            },
+            onInstall = {
+                (updateState as? AppUpdateState.Ready)?.let { installUpdate(it.info) }
+            },
+            onRetry = { scope.launch { checkForUpdate(manual = true) } },
+            onRetryDownload = {
+                (updateState as? AppUpdateState.Downloading)?.let { downloadUpdate(it.info) }
+            },
+            onCancelDownload = {
+                (updateState as? AppUpdateState.Downloading)?.let { cancelUpdateDownload(it.info) }
+            },
+        )
+    }
 }
 
 @Composable
@@ -405,6 +636,11 @@ private fun NativeSettingsPanel(
     onOpenBatterySettings: () -> Unit,
     onOpenBackgroundSettings: () -> Unit,
     onReconnect: () -> Unit,
+    updateState: AppUpdateState,
+    onCheckUpdate: () -> Unit,
+    onDownloadUpdate: (AppUpdateInfo) -> Unit,
+    onInstallUpdate: (AppUpdateInfo) -> Unit,
+    onCancelDownload: (AppUpdateInfo) -> Unit,
     onClose: () -> Unit,
 ) {
     Column(
@@ -511,6 +747,59 @@ private fun NativeSettingsPanel(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        HorizontalDivider()
+        Text("应用更新", style = MaterialTheme.typography.titleMedium)
+        Text(
+            when (updateState) {
+                AppUpdateState.Idle -> "可以手动检查最新版本"
+                AppUpdateState.Checking -> "正在检查更新…"
+                AppUpdateState.Latest -> "当前已经是最新版本"
+                is AppUpdateState.Available -> "发现新版本 ${updateState.info.versionName}"
+                is AppUpdateState.Downloading -> if (updateState.pausedReason != null) {
+                    "下载已暂停，请检查网络后重新下载"
+                } else {
+                    updateState.progress?.let { "正在下载更新 $it%" } ?: "正在下载更新…"
+                }
+                is AppUpdateState.Ready -> "更新已下载，可以安装"
+                is AppUpdateState.Error -> updateState.message
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        when (val state = updateState) {
+            is AppUpdateState.Available -> OutlinedButton(
+                onClick = { onDownloadUpdate(state.info) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("下载 ${state.info.versionName} 更新") }
+            is AppUpdateState.Ready -> Button(
+                onClick = { onInstallUpdate(state.info) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("安装更新") }
+            is AppUpdateState.Downloading -> Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (state.pausedReason != null) {
+                    Button(
+                        onClick = { onDownloadUpdate(state.info) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("重新下载") }
+                }
+                OutlinedButton(
+                    onClick = { onCancelDownload(state.info) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("取消下载") }
+                TextButton(
+                    onClick = onCheckUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("检查是否有更高版本") }
+            }
+            else -> OutlinedButton(
+                onClick = onCheckUpdate,
+                enabled = updateState !is AppUpdateState.Checking,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("检查更新") }
+        }
         Spacer(Modifier.height(12.dp))
         Text(
             "版本 ${BuildConfig.VERSION_NAME}",
@@ -731,6 +1020,15 @@ private fun openBatteryOptimizationSettings(context: Context, launch: (Intent) -
 private fun isBatteryOptimizationIgnored(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)
         .isIgnoringBatteryOptimizations(context.packageName)
+
+private suspend fun launchVerifiedInstaller(
+    activity: Activity,
+    updateManager: AppUpdateManager,
+    info: AppUpdateInfo,
+): Result<Unit> = updateManager.verify(info).mapCatching {
+    // 每次打开安装器前重新校验，防止下载完成后文件被替换。
+    activity.startActivity(updateManager.installerIntent(info))
+}
 
 private fun openBackgroundRunSettings(context: Context, launch: (Intent) -> Unit) {
     val opened = BackgroundRunSettingsPolicy.tryCandidates(

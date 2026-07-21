@@ -82,7 +82,7 @@ func run(logger *slog.Logger) error {
 	}
 	apiServer := api.NewServer(api.Dependencies{
 		Store: database, Vault: vault, Auth: authService, Scheduler: schedulerService,
-		Push: pushService, Events: eventHub, Static: staticHandler,
+		Push: pushService, Events: eventHub, AndroidUpdates: api.NewGitHubReleaseUpdateProvider(), Static: staticHandler,
 		PublicBaseURL: configuration.PublicBaseURL, AllowPrivateTargets: configuration.AllowPrivateTargets, Logger: logger,
 	})
 	httpServer := &http.Server{

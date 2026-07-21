@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "android/**"
+      - "scripts/generate-android-update-manifest.py"
       - ".github/workflows/android.yml"
   push:
     branches:
@@ -14,6 +15,7 @@ on:
       - "android-v*"
     paths:
       - "android/**"
+      - "scripts/generate-android-update-manifest.py"
       - ".github/workflows/android.yml"
 
 concurrency:
@@ -58,6 +60,59 @@ jobs:
       - name: 构建调试安装包
         run: ./gradlew --no-daemon assembleDebug
 
+      - name: 验证在线更新清单脚本
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile ../scripts/generate-android-update-manifest.py
+          version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/p' app/build.gradle.kts | head -n 1)"
+          tag="android-v${version_name}"
+          python3 ../scripts/generate-android-update-manifest.py \
+            --gradle-config app/build.gradle.kts \
+            --tag "$tag" \
+            --check-version-only
+          if python3 ../scripts/generate-android-update-manifest.py \
+            --gradle-config app/build.gradle.kts \
+            --tag "android-v0.0.0" \
+            --check-version-only; then
+            echo "错误标签没有被拒绝" >&2
+            exit 1
+          fi
+
+          test_dir="build/update-manifest-test"
+          mkdir -p "$test_dir"
+          apk_name="poolwatch-${tag}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$test_dir/$apk_name"
+          apk_size="$(stat -c '%s' "$test_dir/$apk_name")"
+          cat > "$test_dir/release.json" <<JSON
+          {
+            "assets": [
+              {"name": "$apk_name", "size": $apk_size, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$apk_name"},
+              {"name": "$apk_name.sha256", "size": 95, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$apk_name.sha256"}
+            ],
+            "body": "自动验证更新说明",
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$tag"
+          }
+          JSON
+          python3 ../scripts/generate-android-update-manifest.py \
+            --apk-path "$test_dir/$apk_name" \
+            --gradle-config app/build.gradle.kts \
+            --output "$test_dir/android-update.json" \
+            --tag "$tag" \
+            --repository "$GITHUB_REPOSITORY" \
+            < "$test_dir/release.json"
+          python3 - "$test_dir/android-update.json" "$apk_size" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert value["sizeBytes"] == int(sys.argv[2])
+          assert value["downloadUrl"].startswith("https://github.com/")
+          assert len(value["sha256"]) == 64
+          PY
+
       - name: 上传调试安装包
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
@@ -94,6 +149,14 @@ jobs:
 
       - name: 设置 Gradle 执行权限
         run: chmod +x gradlew
+
+      - name: 校验发布标签与应用版本
+        shell: bash
+        run: |
+          python3 ../scripts/generate-android-update-manifest.py \
+            --gradle-config app/build.gradle.kts \
+            --tag "$GITHUB_REF_NAME" \
+            --check-version-only
 
       - name: 生成签名文件与配置
         shell: bash
@@ -142,11 +205,42 @@ jobs:
           cd dist
           sha256sum "$output_name" > "$output_name.sha256"
 
-      - name: 创建 GitHub Release
+      - name: 创建 GitHub 草稿 Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           name: 号池监控 ${{ github.ref_name }}
+          draft: true
+          fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
             android/dist/*.apk
             android/dist/*.sha256
+
+      - name: 生成在线更新元数据
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          apk_path="dist/poolwatch-${GITHUB_REF_NAME}.apk"
+          gh release view "$GITHUB_REF_NAME" --json assets,body,publishedAt,url |
+            python3 ../scripts/generate-android-update-manifest.py \
+              --apk-path "$apk_path" \
+              --gradle-config app/build.gradle.kts \
+              --output dist/android-update.json \
+              --tag "$GITHUB_REF_NAME" \
+              --repository "$GITHUB_REPOSITORY"
+
+      - name: 上传在线更新元数据
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/android-update.json --clobber
+
+      - name: 发布完整 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
