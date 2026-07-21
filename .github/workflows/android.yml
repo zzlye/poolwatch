@@ -7,6 +7,7 @@ on:
     paths:
       - "android/**"
       - "scripts/generate-android-update-manifest.py"
+      - "scripts/test_generate_android_update_manifest.py"
       - ".github/workflows/android.yml"
   push:
     branches:
@@ -16,6 +17,7 @@ on:
     paths:
       - "android/**"
       - "scripts/generate-android-update-manifest.py"
+      - "scripts/test_generate_android_update_manifest.py"
       - ".github/workflows/android.yml"
 
 concurrency:
@@ -65,6 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile ../scripts/generate-android-update-manifest.py
+          python3 ../scripts/test_generate_android_update_manifest.py
           version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*$/\1/p' app/build.gradle.kts | head -n 1)"
           tag="android-v${version_name}"
           python3 ../scripts/generate-android-update-manifest.py \
@@ -87,12 +90,12 @@ jobs:
           cat > "$test_dir/release.json" <<JSON
           {
             "assets": [
-              {"name": "$apk_name", "size": $apk_size, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$apk_name"},
-              {"name": "$apk_name.sha256", "size": 95, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$apk_name.sha256"}
+              {"name": "$apk_name", "size": $apk_size, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/untagged-temporary/$apk_name"},
+              {"name": "$apk_name.sha256", "size": 95, "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/untagged-temporary/$apk_name.sha256"}
             ],
             "body": "自动验证更新说明",
             "publishedAt": "2026-01-01T00:00:00Z",
-            "url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$tag"
+            "url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/untagged-temporary"
           }
           JSON
           python3 ../scripts/generate-android-update-manifest.py \
@@ -102,14 +105,17 @@ jobs:
             --tag "$tag" \
             --repository "$GITHUB_REPOSITORY" \
             < "$test_dir/release.json"
-          python3 - "$test_dir/android-update.json" "$apk_size" <<'PY'
+          python3 - "$test_dir/android-update.json" "$apk_size" "$GITHUB_REPOSITORY" "$tag" "$apk_name" <<'PY'
           import json
           import pathlib
           import sys
 
           value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
           assert value["sizeBytes"] == int(sys.argv[2])
-          assert value["downloadUrl"].startswith("https://github.com/")
+          repository, tag, apk_name = sys.argv[3:6]
+          expected_base = f"https://github.com/{repository}/releases"
+          assert value["downloadUrl"] == f"{expected_base}/download/{tag}/{apk_name}"
+          assert value["releaseUrl"] == f"{expected_base}/tag/{tag}"
           assert len(value["sha256"]) == 64
           PY
 

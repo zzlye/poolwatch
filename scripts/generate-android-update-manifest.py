@@ -82,6 +82,17 @@ def find_release_asset(release: dict[str, object], name: str) -> dict[str, objec
     raise SystemExit(f"GitHub Release 中未找到资产：{name}")
 
 
+def canonical_release_urls(repository: str, tag: str, apk_name: str) -> tuple[str, str]:
+    """生成不受草稿 Release 临时地址影响的正式发布地址。"""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise SystemExit(f"GitHub 仓库格式不正确：{repository}")
+    base_url = f"https://github.com/{repository}"
+    return (
+        f"{base_url}/releases/tag/{tag}",
+        f"{base_url}/releases/download/{tag}/{apk_name}",
+    )
+
+
 def main() -> int:
     args = parse_args()
     if not re.fullmatch(r"android-v[^/]+", args.tag):
@@ -100,7 +111,6 @@ def main() -> int:
         raise SystemExit(f"未找到安装包：{args.apk_path}")
 
     release = read_release_info()
-    release_url = str(release.get("url") or f"https://github.com/{args.repository}/releases/tag/{args.tag}")
     published_at = str(release.get("publishedAt") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     release_notes = release.get("body")
     if not isinstance(release_notes, str):
@@ -116,9 +126,10 @@ def main() -> int:
         raise SystemExit(f"安装包名称不符合发布约定：应为 {apk_name}")
     apk_asset = find_release_asset(release, apk_name)
     find_release_asset(release, f"{apk_name}.sha256")
-    download_url = apk_asset.get("url")
-    if not isinstance(download_url, str) or not download_url.startswith("https://github.com/"):
-        raise SystemExit("GitHub Release 安装包缺少公开下载地址")
+    # 草稿 Release 的资产地址包含 untagged 临时标识，公开后会失效，因此按正式标签生成稳定地址。
+    release_url, download_url = canonical_release_urls(
+        args.repository, args.tag, apk_name
+    )
     size_bytes = args.apk_path.stat().st_size
     asset_size = apk_asset.get("size")
     if not isinstance(asset_size, int) or asset_size != size_bytes:
