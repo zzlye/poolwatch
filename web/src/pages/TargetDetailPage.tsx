@@ -9,7 +9,7 @@ import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '.
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
 import { formatDateTime, formatMetric, formatRelativeTime } from '../lib/format'
-import { metricLabels, targetKindLabels, type MetricKey, type MetricValue, type ThresholdComparison } from '../types'
+import { metricLabels, targetKindLabels, type MetricKey, type MetricValue, type Target, type ThresholdComparison } from '../types'
 
 function thresholdComparison(metric?: MetricValue): ThresholdComparison {
   // 历史渠道没有保存比较方向时，保持旧版“小于等于”判断。
@@ -53,6 +53,32 @@ export default function TargetDetailPage() {
       ])
     }
   })
+  const quotaRefreshMutation = useMutation({
+    mutationFn: (accountIds: string[]) => api.refreshTargetAccountQuotas(id, accountIds),
+    onSuccess: (result) => {
+      const refreshedAccounts = new Map(result.accounts.map((account) => [account.id, account]))
+      queryClient.setQueryData<Target>(['target', id], (current) => {
+        if (!current?.accounts) return current
+        return {
+          ...current,
+          accounts: current.accounts.map((account) => {
+            const refreshed = refreshedAccounts.get(account.id)
+            if (!refreshed) return account
+            // 额度刷新只合并额度相关结果，健康状态仍以常规渠道检测为准。
+            return {
+              ...account,
+              ...refreshed,
+              status: account.status,
+              statusText: account.statusText,
+              recoveryAt: account.recoveryAt,
+              success: account.success,
+              fail: account.fail
+            }
+          })
+        }
+      })
+    }
+  })
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteTarget(id),
     onSuccess: async () => {
@@ -65,7 +91,6 @@ export default function TargetDetailPage() {
   })
 
   const selectedDefinition = useMemo(() => targetQuery.data?.metrics.find((item) => item.key === selectedMetric), [selectedMetric, targetQuery.data?.metrics])
-
   if (targetQuery.isPending) return <LoadingView label="正在读取渠道详情" />
   if (targetQuery.isError) return <ErrorView message={targetQuery.error.message} onRetry={() => void targetQuery.refetch()} />
   const target = targetQuery.data
@@ -126,7 +151,7 @@ export default function TargetDetailPage() {
       {target.kind === 'cliproxyapi' ? (
         <section className="content-section" aria-labelledby="cliproxy-account-title">
           <div className="section-heading"><div><h2 id="cliproxy-account-title">CLIProxyAPI 账号状态</h2><p>只读显示账号、提供商、类型、状态、真实额度、调用统计与恢复时间。</p></div></div>
-          {target.accounts?.length ? <CLIProxyAccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
+          {target.accounts?.length ? <CLIProxyAccountPoolView key={id} accounts={target.accounts} onRefreshQuota={quotaRefreshMutation.mutateAsync} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
         </section>
       ) : null}
 

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { AccountPoolView } from '../components/AccountPoolView'
 import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import type { SanitizedAccount, TargetStatus } from '../types'
@@ -93,6 +93,7 @@ describe('CLIProxyAPI 账号筛选与分页', () => {
     expect(screen.getByRole('columnheader', { name: '成功' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: '失败' })).toBeInTheDocument()
     expect(screen.queryByText('图片额度')).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: '账号状态' })).toContainHTML('<option value="warning">警告</option>')
   })
 
   it('支持账号搜索和十条一页的分页', () => {
@@ -112,5 +113,46 @@ describe('CLIProxyAPI 账号筛选与分页', () => {
 
     expect(screen.getByText('账号 abcdef01…')).toBeInTheDocument()
     expect(screen.queryByText(fullID)).not.toBeInTheDocument()
+  })
+
+  it('进入页面自动刷新默认第一页，按钮也只提交当前十个账号', async () => {
+    const onRefreshQuota = vi.fn(async (accountIds: string[]) => ({
+      accounts: accounts.filter((account) => accountIds.includes(account.id)),
+      refreshedCount: accountIds.length,
+      unavailableCount: 0,
+      unsupportedCount: 0
+    }))
+    render(<CLIProxyAccountPoolView accounts={accounts} onRefreshQuota={onRefreshQuota} />)
+
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(1))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(accounts.slice(0, 10).map((account) => account.id))
+    await screen.findByText('本页额度已刷新：更新 10 个，暂未获取 0 个。')
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新本页额度' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(2))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(accounts.slice(0, 10).map((account) => account.id))
+  })
+
+  it('翻页和筛选后只自动刷新新页面实际显示的账号', async () => {
+    const onRefreshQuota = vi.fn(async (accountIds: string[]) => ({
+      accounts: accounts.filter((account) => accountIds.includes(account.id)),
+      refreshedCount: accountIds.length,
+      unavailableCount: 0,
+      unsupportedCount: 0
+    }))
+    render(<CLIProxyAccountPoolView accounts={accounts} onRefreshQuota={onRefreshQuota} />)
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(2))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-11', 'cli-12'])
+
+    fireEvent.change(screen.getByRole('combobox', { name: '提供商' }), { target: { value: 'openai' } })
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(3))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-1', 'cli-3', 'cli-5', 'cli-7', 'cli-9', 'cli-11'])
+
+    fireEvent.change(screen.getByRole('combobox', { name: '账号状态' }), { target: { value: 'error' } })
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(4))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-3', 'cli-7', 'cli-11'])
   })
 })

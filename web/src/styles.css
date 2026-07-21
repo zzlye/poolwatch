@@ -678,6 +678,24 @@ tbody tr:hover {
   flex: 0 0 168px;
 }
 
+.cliproxy-quota-refresh-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.cliproxy-quota-refresh-bar p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.cliproxy-quota-refresh-bar + .inline-message {
+  margin-bottom: 12px;
+}
+
 .account-table-wrap {
   overflow-x: hidden;
   overflow-x: clip;
@@ -2533,6 +2551,15 @@ tbody tr:hover {
   .account-filter-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .cliproxy-quota-refresh-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .cliproxy-quota-refresh-bar .button {
+    width: 100%;
   }
 
   .account-filter-field {

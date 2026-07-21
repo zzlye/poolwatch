@@ -87,7 +87,15 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 		return err
 	}
 	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
-		if err := e.store.ReplaceChatAccounts(ctx, target.ID, sanitizedAccounts(target.Kind, target.ID, snapshot.Accounts, observedAt)); err != nil {
+		accounts := sanitizedAccounts(target.Kind, target.ID, snapshot.Accounts, observedAt)
+		if target.Kind == string(monitor.TargetKindCLIProxyAPI) {
+			existing, err := e.store.ListChatAccounts(ctx, target.ID)
+			if err != nil {
+				return err
+			}
+			mergeStoredCLIProxyAPIQuota(accounts, existing)
+		}
+		if err := e.store.ReplaceChatAccounts(ctx, target.ID, accounts); err != nil {
 			return err
 		}
 	}
@@ -122,6 +130,21 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 		return err
 	}
 	return e.store.UpdateTargetCheck(ctx, target.ID, string(status), 0, "", observedAt)
+}
+
+// SaveAccountQuotas 只更新 CLIProxyAPI 账号的额度与套餐字段，不产生快照或告警。
+func (e *Engine) SaveAccountQuotas(ctx context.Context, target store.Target, accounts []monitor.AccountStatus) error {
+	if target.Kind != string(monitor.TargetKindCLIProxyAPI) {
+		return errors.New("只有 CLIProxyAPI 渠道支持账号额度刷新")
+	}
+	if len(accounts) == 0 {
+		return errors.New("没有可保存的账号额度")
+	}
+	sanitized := sanitizedAccounts(target.Kind, target.ID, accounts, e.now())
+	if len(sanitized) != len(accounts) {
+		return errors.New("账号额度结果包含无效标识")
+	}
+	return e.store.UpdateChatAccountQuotas(ctx, target.ID, sanitized)
 }
 
 // HandleFailure 保存安全错误摘要，并按错误类型和连续次数开启告警。
@@ -303,7 +326,7 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 		if stableValue == "" {
 			stableValue = strings.Join([]string{maskedEmail, displayName, provider, accountType, fmt.Sprintf("%d", index)}, "|")
 		}
-		externalID := identity.HashToken(targetKind + "|" + stableValue)[:24]
+		externalID := monitor.PublicAccountID(monitor.TargetKind(targetKind), stableValue)
 		result = append(result, store.ChatAccount{
 			TargetID: targetID, ExternalID: externalID, DisplayName: displayName, Provider: provider,
 			Email: maskedEmail, Type: accountType, Status: normalizeAccountStatus(account.Status), StatusText: statusText,
@@ -313,6 +336,30 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 		})
 	}
 	return result
+}
+
+// mergeStoredCLIProxyAPIQuota 在常规健康检测时保留上一次按页读取的额度与套餐。
+func mergeStoredCLIProxyAPIQuota(current, existing []store.ChatAccount) {
+	previous := make(map[string]store.ChatAccount, len(existing))
+	for _, account := range existing {
+		previous[account.ExternalID] = account
+	}
+	for index := range current {
+		old, found := previous[current[index].ExternalID]
+		if !found {
+			continue
+		}
+		if current[index].QuotaState == "" && len(current[index].QuotaWindows) == 0 {
+			current[index].QuotaState = old.QuotaState
+			current[index].QuotaWindows = append([]store.AccountQuotaWindow(nil), old.QuotaWindows...)
+		}
+		if current[index].Type == "" {
+			current[index].Type = old.Type
+		}
+		if current[index].SubscriptionExpiresAt == "" {
+			current[index].SubscriptionExpiresAt = old.SubscriptionExpiresAt
+		}
+	}
 }
 
 func sanitizeAccountQuotaState(value string) string {

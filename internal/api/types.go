@@ -99,6 +99,17 @@ type accountResponse struct {
 	Fail                  int64                        `json:"fail"`
 }
 
+type accountQuotaRefreshRequest struct {
+	AccountIDs []string `json:"accountIds"`
+}
+
+type accountQuotaRefreshResponse struct {
+	Accounts         []accountResponse `json:"accounts"`
+	RefreshedCount   int               `json:"refreshedCount"`
+	UnavailableCount int               `json:"unavailableCount"`
+	UnsupportedCount int               `json:"unsupportedCount"`
+}
+
 type targetResponse struct {
 	ID                   string            `json:"id"`
 	Name                 string            `json:"name"`

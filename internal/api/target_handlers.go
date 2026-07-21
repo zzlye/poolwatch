@@ -257,6 +257,62 @@ func (s *Server) handleCheckTarget(response http.ResponseWriter, request *http.R
 	response.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleRefreshAccountQuotas(response http.ResponseWriter, request *http.Request) {
+	var body accountQuotaRefreshRequest
+	if err := decodeJSON(response, request, &body); err != nil {
+		writeAPIError(response, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(body.AccountIDs) == 0 || len(body.AccountIDs) > monitor.MaxAccountQuotaRefreshAccounts {
+		writeAPIError(response, http.StatusBadRequest, "每次需要选择 1 至 100 个账号")
+		return
+	}
+	accounts, err := s.dependencies.Scheduler.RefreshAccountQuotas(request.Context(), request.PathValue("id"), body.AccountIDs)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeAPIError(response, http.StatusNotFound, "渠道不存在")
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		writeAPIError(response, http.StatusGatewayTimeout, "刷新账号额度超时")
+		return
+	}
+	if errors.Is(err, scheduler.ErrAlreadyRunning) {
+		writeAPIError(response, http.StatusConflict, "该渠道正在检测或刷新额度")
+		return
+	}
+	if err != nil {
+		switch monitor.ErrorClassOf(err) {
+		case monitor.ErrorClassConfig:
+			writeAPIError(response, http.StatusBadRequest, err.Error())
+		case monitor.ErrorClassResponse:
+			writeAPIError(response, http.StatusConflict, err.Error())
+		default:
+			if strings.Contains(err.Error(), "只有 CLIProxyAPI") {
+				writeAPIError(response, http.StatusBadRequest, err.Error())
+			} else {
+				writeAPIError(response, http.StatusBadGateway, "刷新账号额度失败，请稍后重试")
+			}
+		}
+		return
+	}
+	result := accountQuotaRefreshResponse{Accounts: make([]accountResponse, 0, len(accounts))}
+	for _, account := range accounts {
+		result.Accounts = append(result.Accounts, mapAccountResponse(string(monitor.TargetKindCLIProxyAPI), account))
+		switch account.QuotaState {
+		case monitor.AccountQuotaStateAvailable:
+			result.RefreshedCount++
+		case monitor.AccountQuotaStateUnsupported:
+			result.UnsupportedCount++
+		default:
+			result.UnavailableCount++
+		}
+	}
+	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.account_quotas_refreshed", request.PathValue("id"),
+		fmt.Sprintf("刷新当前页 %d 个账号额度", len(result.Accounts)), time.Now().UTC())
+	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": request.PathValue("id")})
+	writeJSON(response, http.StatusOK, result)
+}
+
 func (s *Server) handleCheckAll(response http.ResponseWriter, request *http.Request) {
 	err := s.dependencies.Scheduler.CheckAll(request.Context())
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

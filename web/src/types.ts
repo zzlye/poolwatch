@@ -67,6 +67,13 @@ export interface SanitizedAccount {
   fail?: number
 }
 
+export interface AccountQuotaRefreshResult {
+  accounts: SanitizedAccount[]
+  refreshedCount: number
+  unavailableCount: number
+  unsupportedCount: number
+}
+
 export interface Target {
   id: string
   name: string

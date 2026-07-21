@@ -27,6 +27,20 @@ type cancelRunner struct {
 	started chan struct{}
 }
 
+type quotaRunner struct {
+	requested []string
+	accounts  []monitor.AccountStatus
+}
+
+func (runner *quotaRunner) Run(_ context.Context, target monitor.TargetInput) (monitor.Result, error) {
+	return monitor.Snapshot{TargetID: target.ID, Kind: target.Kind, Status: monitor.TargetStatusHealthy}, nil
+}
+
+func (runner *quotaRunner) RefreshAccountQuotas(_ context.Context, _ monitor.TargetInput, accountIDs []string) ([]monitor.AccountStatus, error) {
+	runner.requested = append([]string(nil), accountIDs...)
+	return append([]monitor.AccountStatus(nil), runner.accounts...), nil
+}
+
 func (runner cancelRunner) Run(ctx context.Context, _ monitor.TargetInput) (monitor.Result, error) {
 	close(runner.started)
 	<-ctx.Done()
@@ -230,6 +244,76 @@ func TestTargetLockWaitsUntilRunningCheckFinishes(t *testing.T) {
 		result.unlock()
 	case <-time.After(2 * time.Second):
 		t.Fatal("检测结束后未取得配置锁")
+	}
+}
+
+func TestRefreshAccountQuotasOnlyUpdatesSelectedAccounts(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	credentialJSON, _ := json.Marshal(monitor.Credential{AdminKey: "management-secret"})
+	credentialEncrypted, err := vault.Encrypt(credentialJSON)
+	if err != nil {
+		t.Fatalf("加密 CLIProxyAPI 管理密钥失败: %v", err)
+	}
+	target.Kind = string(monitor.TargetKindCLIProxyAPI)
+	target.CredentialsEnc = credentialEncrypted
+	target.ConfigJSON = `{}`
+	if err := database.UpdateTarget(context.Background(), target); err != nil {
+		t.Fatalf("更新测试渠道类型失败: %v", err)
+	}
+	firstID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "auth-first")
+	secondID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "auth-second")
+	if err := database.ReplaceChatAccounts(context.Background(), target.ID, []store.ChatAccount{
+		{
+			TargetID: target.ID, ExternalID: firstID, Provider: "codex", Type: "plus", Status: string(monitor.TargetStatusHealthy),
+			StatusText: "可用", QuotaState: monitor.AccountQuotaStateAvailable,
+			QuotaWindows: []store.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: "80"}},
+		},
+		{
+			TargetID: target.ID, ExternalID: secondID, Provider: "codex", Type: "free", Status: string(monitor.TargetStatusWarning),
+			StatusText: "参数警告", QuotaState: monitor.AccountQuotaStateAvailable,
+			QuotaWindows: []store.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: "60"}},
+		},
+	}); err != nil {
+		t.Fatalf("保存测试账号失败: %v", err)
+	}
+	runner := &quotaRunner{accounts: []monitor.AccountStatus{{
+		ExternalID: "auth-first", Provider: "codex", Type: "free", Status: string(monitor.TargetStatusError),
+		StatusText: "不应覆盖", QuotaState: monitor.AccountQuotaStateUnavailable,
+	}}}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	updated, err := service.RefreshAccountQuotas(context.Background(), target.ID, []string{firstID})
+	if err != nil {
+		t.Fatalf("刷新当前页额度失败: %v", err)
+	}
+	if len(runner.requested) != 1 || runner.requested[0] != firstID || len(updated) != 1 || updated[0].ExternalID != firstID {
+		t.Fatalf("调度器提交的账号范围不正确：请求=%#v 返回=%#v", runner.requested, updated)
+	}
+	stored, err := database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("读取额度刷新结果失败: %v", err)
+	}
+	byID := make(map[string]store.ChatAccount, len(stored))
+	for _, account := range stored {
+		byID[account.ExternalID] = account
+	}
+	if byID[firstID].Status != string(monitor.TargetStatusHealthy) || byID[firstID].StatusText != "可用" || byID[firstID].Type != "plus" ||
+		byID[firstID].QuotaState != monitor.AccountQuotaStateUnavailable || len(byID[firstID].QuotaWindows) != 0 {
+		t.Fatalf("已选账号只应更新额度字段：%#v", byID[firstID])
+	}
+	if byID[secondID].Status != string(monitor.TargetStatusWarning) || byID[secondID].QuotaState != monitor.AccountQuotaStateAvailable ||
+		len(byID[secondID].QuotaWindows) != 1 || byID[secondID].QuotaWindows[0].RemainingPercent != "60" {
+		t.Fatalf("其他页面账号额度应保持原值：%#v", byID[secondID])
+	}
+}
+
+func TestRefreshAccountQuotasRejectsOtherTargetKinds(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	service := NewService(database, vault, &quotaRunner{}, alerts.NewEngine(database, nil), false)
+	_, err := service.RefreshAccountQuotas(context.Background(), target.ID, []string{"0123456789abcdef01234567"})
+	if err == nil || !strings.Contains(err.Error(), "只有 CLIProxyAPI") {
+		t.Fatalf("其他渠道类型应被拒绝: %v", err)
 	}
 }
 

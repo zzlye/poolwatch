@@ -281,6 +281,25 @@ func TestCLIProxyAccountsAreHashedAndSanitized(t *testing.T) {
 	}
 }
 
+func TestCLIProxyHealthSnapshotPreservesLastQuota(t *testing.T) {
+	existing := []store.ChatAccount{{
+		ExternalID: monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "account-id"), Type: "plus", QuotaState: monitor.AccountQuotaStateAvailable,
+		QuotaWindows:          []store.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: "75"}},
+		SubscriptionExpiresAt: "2026-08-20T08:00:00Z",
+	}}
+	current := sanitizedAccounts(string(monitor.TargetKindCLIProxyAPI), "target_cli", []monitor.AccountStatus{{
+		ExternalID: "account-id", Provider: "codex", Status: string(monitor.TargetStatusHealthy),
+	}}, time.Now().UTC())
+	if len(current) != 1 {
+		t.Fatalf("健康快照账号未生成：%#v", current)
+	}
+	mergeStoredCLIProxyAPIQuota(current, existing)
+	if current[0].QuotaState != monitor.AccountQuotaStateAvailable || len(current[0].QuotaWindows) != 1 ||
+		current[0].QuotaWindows[0].RemainingPercent != "75" || current[0].Type != "plus" || current[0].SubscriptionExpiresAt == "" {
+		t.Fatalf("常规健康检测应保留上次额度：%#v", current[0])
+	}
+}
+
 func TestCLIProxyAccountLabelMasksEmailAndDropsSecrets(t *testing.T) {
 	invalidRemaining := decimal.NewFromInt(150)
 	accounts := sanitizedAccounts(string(monitor.TargetKindCLIProxyAPI), "target_cli", []monitor.AccountStatus{

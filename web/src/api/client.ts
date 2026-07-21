@@ -1,5 +1,6 @@
 import { mockRequest } from './mock'
 import type {
+  AccountQuotaRefreshResult,
   Alert,
   BootstrapState,
   DashboardData,
@@ -82,6 +83,10 @@ export const api = {
   deleteTarget: (id: string) => apiRequest<void>(`/api/targets/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   testTarget: (payload: TargetDraft) => apiRequest<TestConnectionResult>('/api/targets/test', { method: 'POST', body: jsonBody(payload) }),
   checkTarget: (id: string) => apiRequest<void>(`/api/targets/${encodeURIComponent(id)}/check`, { method: 'POST' }),
+  refreshTargetAccountQuotas: (id: string, accountIds: string[]) => apiRequest<AccountQuotaRefreshResult>(`/api/targets/${encodeURIComponent(id)}/accounts/quota/refresh`, {
+    method: 'POST',
+    body: jsonBody({ accountIds })
+  }),
   checkAll: () => apiRequest<void>('/api/checks', { method: 'POST' }),
   history: (id: string, metric?: string) => apiRequest<HistoryResult>(`/api/targets/${encodeURIComponent(id)}/history${metric ? `?metric=${encodeURIComponent(metric)}` : ''}`),
   alerts: (status = 'all') => apiRequest<Alert[]>(`/api/alerts?status=${encodeURIComponent(status)}`),

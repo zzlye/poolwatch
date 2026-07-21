@@ -140,6 +140,79 @@ func (s *Service) CheckTarget(ctx context.Context, targetID string) error {
 	return s.runTarget(ctx, targetID)
 }
 
+// RefreshAccountQuotas 刷新 CLIProxyAPI 当前页账号额度，并与常规检测共用渠道锁。
+func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, accountIDs []string) ([]store.ChatAccount, error) {
+	if len(accountIDs) == 0 || len(accountIDs) > monitor.MaxAccountQuotaRefreshAccounts {
+		return nil, errors.New("每次需要选择 1 至 100 个账号")
+	}
+	if !s.acquireTarget(targetID) {
+		return nil, ErrAlreadyRunning
+	}
+	defer s.releaseTarget(targetID)
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	target, err := s.store.TargetByID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if target.Kind != string(monitor.TargetKindCLIProxyAPI) {
+		return nil, errors.New("只有 CLIProxyAPI 渠道支持账号额度刷新")
+	}
+	runtimeConfig, err := s.runtimeConfig(target)
+	if err != nil {
+		return nil, err
+	}
+	refresher, ok := s.runner.(monitor.AccountQuotaRefresher)
+	if !ok {
+		return nil, errors.New("当前检测器不支持账号额度刷新")
+	}
+	// 每四个账号为一批预留七秒，并为账号列表读取留出三十秒。
+	batches := (len(accountIDs) + 3) / 4
+	quotaTimeout := 30*time.Second + time.Duration(batches)*7*time.Second
+	timeoutContext, cancel := context.WithTimeout(ctx, quotaTimeout)
+	defer cancel()
+	accounts, err := refresher.RefreshAccountQuotas(timeoutContext, runtimeConfig, accountIDs)
+	if err != nil {
+		return nil, err
+	}
+	currentTarget, err := s.store.TargetByID(ctx, target.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, err
+	}
+	if targetMonitoringConfigChanged(target, currentTarget) {
+		return nil, errors.New("渠道配置已经变化，请刷新页面后重试")
+	}
+	if err := s.alerts.SaveAccountQuotas(ctx, currentTarget, accounts); err != nil {
+		return nil, err
+	}
+	storedAccounts, err := s.store.ListChatAccounts(ctx, target.ID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]store.ChatAccount, len(storedAccounts))
+	for _, account := range storedAccounts {
+		byID[account.ExternalID] = account
+	}
+	result := make([]store.ChatAccount, 0, len(accounts))
+	for _, account := range accounts {
+		publicID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, account.ExternalID)
+		stored, exists := byID[publicID]
+		if !exists {
+			return nil, errors.New("账号列表已经变化，请刷新页面后重试")
+		}
+		result = append(result, stored)
+	}
+	return result, nil
+}
+
 // LockTarget 等待并独占一个渠道，供配置更新与检测共享同一把渠道锁。
 func (s *Service) LockTarget(ctx context.Context, targetID string) (func(), error) {
 	if s.acquireTarget(targetID) {

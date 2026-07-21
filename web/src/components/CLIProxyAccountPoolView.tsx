@@ -1,8 +1,8 @@
-import { ChevronLeft, ChevronRight, Search } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Search } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { formatDateTime } from '../lib/format'
-import type { SanitizedAccount, TargetStatus } from '../types'
-import { EmptyState } from './Common'
+import type { AccountQuotaRefreshResult, SanitizedAccount, TargetStatus } from '../types'
+import { EmptyState, InlineMessage } from './Common'
 import { StatusPill } from './StatusPill'
 
 type AccountStatusFilter = 'all' | TargetStatus
@@ -10,7 +10,7 @@ type AccountStatusFilter = 'all' | TargetStatus
 const statusOptions: Array<{ value: AccountStatusFilter; label: string }> = [
   { value: 'all', label: '全部状态' },
   { value: 'healthy', label: '正常' },
-  { value: 'warning', label: '限流' },
+  { value: 'warning', label: '警告' },
   { value: 'error', label: '异常' },
   { value: 'disabled', label: '禁用' },
   { value: 'unknown', label: '待检测' }
@@ -18,7 +18,7 @@ const statusOptions: Array<{ value: AccountStatusFilter; label: string }> = [
 
 const statusLabels: Record<TargetStatus, string> = {
   healthy: '正常',
-  warning: '限流',
+  warning: '警告',
   error: '异常',
   disabled: '禁用',
   unknown: '待检测'
@@ -134,13 +134,33 @@ function AccountQuotaView({ account }: { account: SanitizedAccount }) {
   )
 }
 
-export function CLIProxyAccountPoolView({ accounts }: { accounts: SanitizedAccount[] }) {
+interface CLIProxyAccountPoolViewProps {
+  accounts: SanitizedAccount[]
+  onRefreshQuota?: (accountIds: string[]) => Promise<AccountQuotaRefreshResult>
+}
+
+interface RefreshFeedback {
+  tone: 'success' | 'danger'
+  message: string
+}
+
+function refreshSuccessMessage(result: AccountQuotaRefreshResult): string {
+  const unsupported = result.unsupportedCount > 0 ? `，不支持 ${result.unsupportedCount} 个` : ''
+  return `本页额度已刷新：更新 ${result.refreshedCount} 个，暂未获取 ${result.unavailableCount} 个${unsupported}。`
+}
+
+export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAccountPoolViewProps) {
   const [search, setSearch] = useState('')
   const [provider, setProvider] = useState('all')
   const [type, setType] = useState('all')
   const [status, setStatus] = useState<AccountStatusFilter>('all')
   const [pageSize, setPageSize] = useState(10)
   const [requestedPage, setRequestedPage] = useState(1)
+  const [pendingRefreshes, setPendingRefreshes] = useState(0)
+  const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>()
+  const autoRefreshedPageKeys = useRef(new Set<string>())
+  const pendingPageKeys = useRef(new Set<string>())
+  const refreshQueue = useRef<Promise<void>>(Promise.resolve())
 
   const providerOptions = useMemo(() => buildFilterOptions(accounts, 'provider'), [accounts])
   const typeOptions = useMemo(() => buildFilterOptions(accounts, 'type'), [accounts])
@@ -165,11 +185,44 @@ export function CLIProxyAccountPoolView({ accounts }: { accounts: SanitizedAccou
   const firstVisible = filteredAccounts.length ? startIndex + 1 : 0
   const lastVisible = filteredAccounts.length ? Math.min(startIndex + pageSize, filteredAccounts.length) : 0
   const hasFilters = Boolean(search.trim()) || provider !== 'all' || type !== 'all' || status !== 'all'
+  const currentAccountIds = useMemo(() => pagedAccounts.map((account) => account.id), [pagedAccounts])
+  const currentPageKey = useMemo(() => JSON.stringify(currentAccountIds), [currentAccountIds])
+
+  const queueQuotaRefresh = useCallback((accountIds: string[]) => {
+    if (!onRefreshQuota || accountIds.length === 0) return
+    const pageKey = JSON.stringify(accountIds)
+    if (pendingPageKeys.current.has(pageKey)) return
+    pendingPageKeys.current.add(pageKey)
+    setPendingRefreshes((count) => count + 1)
+    setRefreshFeedback(undefined)
+
+    // 同一渠道的额度请求按顺序执行，避免快速翻页时让后端锁竞争。
+    const task = refreshQueue.current
+      .catch(() => undefined)
+      .then(() => onRefreshQuota(accountIds))
+      .then((result) => setRefreshFeedback({ tone: 'success', message: refreshSuccessMessage(result) }))
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : '刷新本页额度失败，请稍后重试。'
+        setRefreshFeedback({ tone: 'danger', message })
+      })
+      .finally(() => {
+        pendingPageKeys.current.delete(pageKey)
+        setPendingRefreshes((count) => Math.max(0, count - 1))
+      })
+    refreshQueue.current = task
+  }, [onRefreshQuota])
 
   useEffect(() => {
     // 账号刷新后若当前页已经不存在，则回到仍然存在的最后一页。
     if (requestedPage !== currentPage) setRequestedPage(currentPage)
   }, [currentPage, requestedPage])
+
+  useEffect(() => {
+    if (!onRefreshQuota || currentAccountIds.length === 0 || autoRefreshedPageKeys.current.has(currentPageKey)) return
+    // 先记录再发起请求，可抑制严格模式和额度回写触发的重复自动刷新。
+    autoRefreshedPageKeys.current.add(currentPageKey)
+    queueQuotaRefresh(currentAccountIds)
+  }, [currentAccountIds, currentPageKey, onRefreshQuota, queueQuotaRefresh])
 
   const resetPage = () => setRequestedPage(1)
   const resetFilters = () => {
@@ -182,6 +235,19 @@ export function CLIProxyAccountPoolView({ accounts }: { accounts: SanitizedAccou
 
   return (
     <>
+      {onRefreshQuota ? (
+        <>
+          <div className="cliproxy-quota-refresh-bar">
+            <p>额度只读取当前筛选结果的本页 {currentAccountIds.length} 个账号。</p>
+            <button className="button secondary" type="button" disabled={pendingRefreshes > 0 || currentAccountIds.length === 0} onClick={() => queueQuotaRefresh(currentAccountIds)}>
+              {pendingRefreshes > 0 ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <RefreshCw aria-hidden="true" size={18} />}
+              {pendingRefreshes > 0 ? '正在刷新' : '刷新本页额度'}
+            </button>
+          </div>
+          {refreshFeedback ? <InlineMessage tone={refreshFeedback.tone}>{refreshFeedback.message}</InlineMessage> : null}
+        </>
+      ) : null}
+
       <div className="account-filter-bar cliproxy-filter-bar" aria-label="CLIProxyAPI 账号筛选">
         <label className="search-field">
           <span className="sr-only">搜索 CLIProxyAPI 账号</span>

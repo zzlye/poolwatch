@@ -36,7 +36,7 @@ const thresholdsByKind: Record<TargetKind, ThresholdDraft[]> = {
   chatgpt2api: [{ key: 'image_quota', label: '图片额度总和', value: '80', unit: '次', comparison: 'lte', alertEnabled: true }],
   cliproxyapi: [
     { key: 'healthy_accounts', label: '可用账号', value: '0', unit: '个', comparison: 'lte', alertEnabled: true },
-    { key: 'limited_accounts', label: '限流账号', value: '1', unit: '个', comparison: 'gte', alertEnabled: true },
+    { key: 'limited_accounts', label: '警告账号', value: '1', unit: '个', comparison: 'gte', alertEnabled: true },
     { key: 'error_accounts', label: '异常账号', value: '1', unit: '个', comparison: 'gte', alertEnabled: true }
   ],
   custom: [{ key: 'wallet_balance', label: '自定义指标', value: '10', unit: '个', comparison: 'lte', alertEnabled: true }]

@@ -108,6 +108,46 @@ func (s *Store) ReplaceChatAccounts(ctx context.Context, targetID string, accoun
 	return tx.Commit()
 }
 
+// UpdateChatAccountQuotas 原子更新指定脱敏账号的额度与套餐，不触碰其他账号的健康状态。
+func (s *Store) UpdateChatAccountQuotas(ctx context.Context, targetID string, accounts []ChatAccount) error {
+	if strings.TrimSpace(targetID) == "" || len(accounts) == 0 {
+		return fmt.Errorf("账号额度更新参数不完整")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, account := range accounts {
+		if account.TargetID != targetID || strings.TrimSpace(account.ExternalID) == "" {
+			return fmt.Errorf("账号额度标识无效")
+		}
+		switch account.QuotaState {
+		case "available", "unavailable", "unsupported":
+		default:
+			return fmt.Errorf("账号额度状态无效")
+		}
+		quotaWindowsJSON, err := json.Marshal(account.QuotaWindows)
+		if err != nil {
+			return fmt.Errorf("序列化账号额度失败: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE chat_accounts SET
+			type = CASE WHEN ? = 'available' AND ? <> '' THEN ? ELSE type END,
+			quota_state = ?, quota_windows_json = ?,
+			subscription_expires_at = CASE WHEN ? <> '' THEN ? ELSE subscription_expires_at END
+			WHERE target_id = ? AND external_id = ?`,
+			account.QuotaState, account.Type, account.Type, account.QuotaState, string(quotaWindowsJSON),
+			account.SubscriptionExpiresAt, account.SubscriptionExpiresAt, targetID, account.ExternalID)
+		if err != nil {
+			return fmt.Errorf("更新账号额度失败: %w", err)
+		}
+		if err := requireAffected(result, "账号已经变化，请刷新页面后重试"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ListChatAccounts 返回一个渠道的脱敏账号列表。
 func (s *Store) ListChatAccounts(ctx context.Context, targetID string) ([]ChatAccount, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT target_id, external_id, display_name, provider, email, type, status,

@@ -1,4 +1,5 @@
 import type {
+  AccountQuotaRefreshResult,
   Alert,
   BootstrapState,
   DashboardData,
@@ -317,6 +318,17 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     const id = decodeURIComponent(parts[3] ?? '')
     const target = targets.find((item) => item.id === id)
     if (!target) throw new Error('未找到渠道')
+    if (parts[4] === 'accounts' && parts[5] === 'quota' && parts[6] === 'refresh' && method === 'POST') {
+      const accountIds = Array.isArray(body?.accountIds) ? body.accountIds.map(String) : []
+      const selectedAccounts = (target.accounts ?? []).filter((account) => accountIds.includes(account.id))
+      const result: AccountQuotaRefreshResult = {
+        accounts: accountIds.flatMap((accountId: string) => selectedAccounts.filter((account) => account.id === accountId)),
+        refreshedCount: selectedAccounts.filter((account) => account.quotaState === 'available').length,
+        unavailableCount: selectedAccounts.filter((account) => account.quotaState === 'unavailable').length,
+        unsupportedCount: selectedAccounts.filter((account) => account.quotaState === 'unsupported').length
+      }
+      return result as T
+    }
     if (parts[4] === 'history') {
       const metric = new URL(path, window.location.origin).searchParams.get('metric') ?? undefined
       return makeHistory(target, metric) as T

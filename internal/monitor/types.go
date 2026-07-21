@@ -3,9 +3,12 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"poolwatch/internal/identity"
 )
 
 // TargetKind 表示受监控渠道的类型。
@@ -67,6 +70,8 @@ const (
 	AccountQuotaStateAvailable   = "available"
 	AccountQuotaStateUnavailable = "unavailable"
 	AccountQuotaStateUnsupported = "unsupported"
+	// MaxAccountQuotaRefreshAccounts 限制单次手动刷新规模，避免误操作触发大量上游请求。
+	MaxAccountQuotaRefreshAccounts = 100
 )
 
 // AlertType 表示上层告警状态机使用的事件类型。
@@ -191,6 +196,16 @@ type AccountStatus struct {
 	ImageInflight int64  `json:"image_inflight"`
 }
 
+// PublicAccountID 将仅服务端可见的上游账号标识转换为稳定的脱敏标识。
+// 调用方必须保证 stableValue 是账号的稳定身份字段，而不是展示名称或临时状态。
+func PublicAccountID(kind TargetKind, stableValue string) string {
+	stableValue = strings.ToLower(strings.TrimSpace(stableValue))
+	if kind == "" || stableValue == "" {
+		return ""
+	}
+	return identity.HashToken(string(kind) + "|" + stableValue)[:24]
+}
+
 // Snapshot 表示一次只读检测结果，不包含任何凭据或原始响应。
 type Snapshot struct {
 	TargetID         string          `json:"target_id"`
@@ -218,6 +233,11 @@ type Result = Snapshot
 // Runner 是主线调度器使用的最小检测接口。
 type Runner interface {
 	Run(ctx context.Context, target TargetInput) (Result, error)
+}
+
+// AccountQuotaRefresher 按前端已经取得的脱敏账号标识刷新少量账号额度。
+type AccountQuotaRefresher interface {
+	RefreshAccountQuotas(ctx context.Context, target TargetInput, accountIDs []string) ([]AccountStatus, error)
 }
 
 // Prober 是连接测试接口使用的临时响应探测契约。

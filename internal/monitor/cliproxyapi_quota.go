@@ -2,7 +2,6 @@ package monitor
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,7 +26,6 @@ const (
 	cliProxyAPIAntigravitySandboxURL        = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels"
 	cliProxyAPIQuotaWorkerCount             = 4
 	cliProxyAPIMaxQuotaWindows              = 64
-	cliProxyAPIQuotaCacheTTL                = 15 * time.Minute
 	cliProxyAPIQuotaAccountTimeout          = 6 * time.Second
 )
 
@@ -36,95 +34,8 @@ type cliProxyAPIQuotaResult struct {
 	PlanType string
 }
 
-type cliProxyAPIQuotaCacheEntry struct {
-	Result    cliProxyAPIQuotaResult
-	ExpiresAt time.Time
-}
-
-// cliProxyAPIQuotaCache 缓存成功读取的真实额度，降低频繁检测对上游账号接口的压力。
-type cliProxyAPIQuotaCache struct {
-	mu      sync.Mutex
-	entries map[string]cliProxyAPIQuotaCacheEntry
-	ttl     time.Duration
-	now     func() time.Time
-}
-
-func newCLIProxyAPIQuotaCache() *cliProxyAPIQuotaCache {
-	return &cliProxyAPIQuotaCache{
-		entries: make(map[string]cliProxyAPIQuotaCacheEntry),
-		ttl:     cliProxyAPIQuotaCacheTTL,
-		now:     func() time.Time { return time.Now().UTC() },
-	}
-}
-
-func (cache *cliProxyAPIQuotaCache) load(key string) (cliProxyAPIQuotaResult, bool) {
-	if cache == nil || key == "" {
-		return cliProxyAPIQuotaResult{}, false
-	}
-	now := cache.currentTime()
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	entry, exists := cache.entries[key]
-	if !exists {
-		return cliProxyAPIQuotaResult{}, false
-	}
-	if !entry.ExpiresAt.After(now) {
-		delete(cache.entries, key)
-		return cliProxyAPIQuotaResult{}, false
-	}
-	return cloneCLIProxyAPIQuotaResult(entry.Result), true
-}
-
-func (cache *cliProxyAPIQuotaCache) store(key string, result cliProxyAPIQuotaResult) {
-	if cache == nil || key == "" {
-		return
-	}
-	now := cache.currentTime()
-	ttl := cache.ttl
-	if ttl <= 0 {
-		ttl = cliProxyAPIQuotaCacheTTL
-	}
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	// 写入时顺便淘汰过期项，避免已删除渠道或账号长期占用内存。
-	for existingKey, entry := range cache.entries {
-		if !entry.ExpiresAt.After(now) {
-			delete(cache.entries, existingKey)
-		}
-	}
-	if cache.entries == nil {
-		cache.entries = make(map[string]cliProxyAPIQuotaCacheEntry)
-	}
-	cache.entries[key] = cliProxyAPIQuotaCacheEntry{
-		Result:    cloneCLIProxyAPIQuotaResult(result),
-		ExpiresAt: now.Add(ttl),
-	}
-}
-
-func (cache *cliProxyAPIQuotaCache) currentTime() time.Time {
-	if cache != nil && cache.now != nil {
-		return cache.now().UTC()
-	}
-	return time.Now().UTC()
-}
-
-func cloneCLIProxyAPIQuotaResult(result cliProxyAPIQuotaResult) cliProxyAPIQuotaResult {
-	cloned := cliProxyAPIQuotaResult{PlanType: result.PlanType}
-	cloned.Windows = make([]AccountQuotaWindow, 0, len(result.Windows))
-	for _, window := range result.Windows {
-		copyWindow := window
-		if window.RemainingPercent != nil {
-			remaining := *window.RemainingPercent
-			copyWindow.RemainingPercent = &remaining
-		}
-		cloned.Windows = append(cloned.Windows, copyWindow)
-	}
-	return cloned
-}
-
-// enrichCLIProxyAPIAccounts 仅调用 CLIProxyAPI 官方管理端点和固定的上游额度查询地址。
-// 任一账号额度读取失败都只保留“暂未获取”，不会让账号状态检测整体失败。
-func (adapter *cliProxyAPIAdapter) enrichCLIProxyAPIAccounts(
+// refreshCLIProxyAPIAccounts 仅为手动刷新路径读取当前页额度。
+func (adapter *cliProxyAPIAdapter) refreshCLIProxyAPIAccounts(
 	ctx context.Context,
 	session *requestSession,
 	target TargetConfig,
@@ -132,6 +43,7 @@ func (adapter *cliProxyAPIAdapter) enrichCLIProxyAPIAccounts(
 	accounts []AccountStatus,
 	rawAccounts []map[string]any,
 ) {
+	// 任一账号额度读取失败都只保留“暂未获取”，不会让本页刷新整体失败。
 	if len(accounts) == 0 || len(accounts) != len(rawAccounts) {
 		return
 	}
@@ -210,29 +122,31 @@ func (adapter *cliProxyAPIAdapter) enrichCLIProxyAPIAccount(
 		return
 	}
 	provider := normalizeCLIProxyAPIProvider(account.Provider)
-	cacheKey := cliProxyAPIQuotaCacheKey(target, managementKey, provider, raw)
-	if cached, exists := adapter.quotaCache.load(cacheKey); exists {
-		applyCLIProxyAPIQuotaResult(account, cached)
-		return
-	}
-
-	var result cliProxyAPIQuotaResult
-	var ok bool
-	switch provider {
-	case "codex":
-		result, ok = adapter.queryCLIProxyAPICodexQuota(ctx, session, target, managementKey, raw)
-	case "gemini-cli":
-		result, ok = adapter.queryCLIProxyAPIGeminiQuota(ctx, session, target, managementKey, raw)
-	case "antigravity":
-		result, ok = adapter.queryCLIProxyAPIAntigravityQuota(ctx, session, target, managementKey, raw)
-	}
+	result, ok := adapter.queryCLIProxyAPIQuota(ctx, session, target, managementKey, provider, raw)
 	if !ok {
 		return
 	}
-	if len(result.Windows) > 0 {
-		adapter.quotaCache.store(cacheKey, result)
-	}
 	applyCLIProxyAPIQuotaResult(account, result)
+}
+
+func (adapter *cliProxyAPIAdapter) queryCLIProxyAPIQuota(
+	ctx context.Context,
+	session *requestSession,
+	target TargetConfig,
+	managementKey string,
+	provider string,
+	raw map[string]any,
+) (cliProxyAPIQuotaResult, bool) {
+	switch provider {
+	case "codex":
+		return adapter.queryCLIProxyAPICodexQuota(ctx, session, target, managementKey, raw)
+	case "gemini-cli":
+		return adapter.queryCLIProxyAPIGeminiQuota(ctx, session, target, managementKey, raw)
+	case "antigravity":
+		return adapter.queryCLIProxyAPIAntigravityQuota(ctx, session, target, managementKey, raw)
+	default:
+		return cliProxyAPIQuotaResult{}, false
+	}
 }
 
 func applyCLIProxyAPIQuotaResult(account *AccountStatus, result cliProxyAPIQuotaResult) {
@@ -247,24 +161,6 @@ func applyCLIProxyAPIQuotaResult(account *AccountStatus, result cliProxyAPIQuota
 	}
 	account.QuotaWindows = mergeCLIProxyAPIQuotaWindows(account.QuotaWindows, result.Windows)
 	account.QuotaState = AccountQuotaStateAvailable
-}
-
-func cliProxyAPIQuotaCacheKey(target TargetConfig, managementKey, provider string, raw map[string]any) string {
-	authIndex := strings.TrimSpace(stringField(raw, "auth_index", "authIndex"))
-	if authIndex == "" {
-		return ""
-	}
-	identityParts := []string{
-		strings.TrimSpace(target.ID),
-		strings.TrimRight(strings.TrimSpace(target.BaseURL), "/"),
-		provider,
-		authIndex,
-		cliProxyAPICodexAccountID(raw),
-		strings.TrimSpace(stringField(raw, "project_id", "projectId")),
-		strings.TrimSpace(managementKey),
-	}
-	sum := sha256.Sum256([]byte(strings.Join(identityParts, "\x00")))
-	return fmt.Sprintf("%x", sum)
 }
 
 func normalizeCLIProxyAPIProvider(value string) string {

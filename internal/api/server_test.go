@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -36,6 +37,34 @@ func (apiTestRunner) Run(_ context.Context, target monitor.TargetInput) (monitor
 			Key: monitor.MetricWalletBalance, Label: "钱包余额", Value: decimal.NewFromInt(5), Unit: "元", Threshold: &threshold,
 		}},
 	}, nil
+}
+
+func (apiTestRunner) RefreshAccountQuotas(_ context.Context, _ monitor.TargetInput, accountIDs []string) ([]monitor.AccountStatus, error) {
+	remaining := decimal.NewFromInt(72)
+	result := make([]monitor.AccountStatus, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		switch accountID {
+		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-ready"):
+			result = append(result, monitor.AccountStatus{
+				ExternalID: "api-ready", Provider: "codex", Type: "plus", Status: string(monitor.TargetStatusError),
+				QuotaState:   monitor.AccountQuotaStateAvailable,
+				QuotaWindows: []monitor.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: &remaining}},
+			})
+		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unavailable"):
+			result = append(result, monitor.AccountStatus{
+				ExternalID: "api-unavailable", Provider: "codex", Status: string(monitor.TargetStatusError),
+				QuotaState: monitor.AccountQuotaStateUnavailable,
+			})
+		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unsupported"):
+			result = append(result, monitor.AccountStatus{
+				ExternalID: "api-unsupported", Provider: "claude", Status: string(monitor.TargetStatusError),
+				QuotaState: monitor.AccountQuotaStateUnsupported,
+			})
+		default:
+			return nil, &monitor.CheckError{Kind: monitor.ErrorClassResponse, Message: "账号列表已经变化，请刷新页面后重试"}
+		}
+	}
+	return result, nil
 }
 
 func (runner apiTestRunner) Probe(ctx context.Context, target monitor.TargetInput) (monitor.Result, any, error) {
@@ -495,6 +524,65 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 	var created targetResponse
 	if err := json.Unmarshal([]byte(body), &created); err != nil || created.Kind != string(monitor.TargetKindCLIProxyAPI) || !created.AuthConfigured {
 		t.Fatalf("CLIProxyAPI 渠道响应不正确：%#v, %v", created, err)
+	}
+	status, _ = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets/"+created.ID+"/accounts/quota/refresh", map[string]any{
+		"accountIds": []string{},
+	}, "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("空账号额度刷新请求应被拒绝: %d", status)
+	}
+	tooManyAccountIDs := make([]string, monitor.MaxAccountQuotaRefreshAccounts+1)
+	for index := range tooManyAccountIDs {
+		tooManyAccountIDs[index] = monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, fmt.Sprintf("account-%d", index))
+	}
+	status, _ = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets/"+created.ID+"/accounts/quota/refresh", map[string]any{
+		"accountIds": tooManyAccountIDs,
+	}, "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("超过一百个账号的额度刷新请求应被拒绝: %d", status)
+	}
+	readyID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-ready")
+	unavailableID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unavailable")
+	unsupportedID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unsupported")
+	otherPageID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-other-page")
+	if err := database.ReplaceChatAccounts(context.Background(), created.ID, []store.ChatAccount{
+		{TargetID: created.ID, ExternalID: readyID, Provider: "codex", Type: "free", Status: string(monitor.TargetStatusHealthy), StatusText: "可用"},
+		{TargetID: created.ID, ExternalID: unavailableID, Provider: "codex", Type: "plus", Status: string(monitor.TargetStatusWarning), StatusText: "参数警告"},
+		{TargetID: created.ID, ExternalID: unsupportedID, Provider: "claude", Type: "api_key", Status: string(monitor.TargetStatusHealthy), StatusText: "可用"},
+		{
+			TargetID: created.ID, ExternalID: otherPageID, Provider: "codex", Type: "plus", Status: string(monitor.TargetStatusHealthy),
+			QuotaState:   monitor.AccountQuotaStateAvailable,
+			QuotaWindows: []store.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: "33"}},
+		},
+	}); err != nil {
+		t.Fatalf("保存接口测试账号失败: %v", err)
+	}
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets/"+created.ID+"/accounts/quota/refresh", map[string]any{
+		"accountIds": []string{readyID, unavailableID, unsupportedID},
+	}, "")
+	if status != http.StatusOK || strings.Contains(body, "api-ready") || strings.Contains(body, "api-unavailable") {
+		t.Fatalf("刷新当前页额度接口失败或泄漏上游标识: %d %s", status, body)
+	}
+	var quotaResult accountQuotaRefreshResponse
+	if err := json.Unmarshal([]byte(body), &quotaResult); err != nil || len(quotaResult.Accounts) != 3 ||
+		quotaResult.RefreshedCount != 1 || quotaResult.UnavailableCount != 1 || quotaResult.UnsupportedCount != 1 {
+		t.Fatalf("额度刷新统计不正确：%#v, %v", quotaResult, err)
+	}
+	storedAccounts, err := database.ListChatAccounts(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取接口刷新后的账号失败: %v", err)
+	}
+	storedByID := make(map[string]store.ChatAccount, len(storedAccounts))
+	for _, account := range storedAccounts {
+		storedByID[account.ExternalID] = account
+	}
+	if storedByID[readyID].Status != string(monitor.TargetStatusHealthy) || storedByID[readyID].Type != "plus" ||
+		storedByID[readyID].QuotaState != monitor.AccountQuotaStateAvailable {
+		t.Fatalf("额度刷新不应覆盖账号健康状态：%#v", storedByID[readyID])
+	}
+	if storedByID[otherPageID].QuotaState != monitor.AccountQuotaStateAvailable || len(storedByID[otherPageID].QuotaWindows) != 1 ||
+		storedByID[otherPageID].QuotaWindows[0].RemainingPercent != "33" {
+		t.Fatalf("其他页面账号额度被意外修改：%#v", storedByID[otherPageID])
 	}
 	stored, err := database.TargetByID(context.Background(), created.ID)
 	if err != nil {

@@ -100,6 +100,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/targets/{id}", s.protected(http.HandlerFunc(s.handleUpdateTarget)))
 	mux.Handle("DELETE /api/targets/{id}", s.protected(http.HandlerFunc(s.handleDeleteTarget)))
 	mux.Handle("POST /api/targets/{id}/check", s.protected(http.HandlerFunc(s.handleCheckTarget)))
+	mux.Handle("POST /api/targets/{id}/accounts/quota/refresh", s.protected(http.HandlerFunc(s.handleRefreshAccountQuotas)))
 	mux.Handle("GET /api/targets/{id}/history", s.protected(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("POST /api/checks", s.protected(http.HandlerFunc(s.handleCheckAll)))
 

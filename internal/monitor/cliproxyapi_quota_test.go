@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,8 +77,28 @@ func TestCLIProxyAPI额度解析支持三类账号(t *testing.T) {
 	assertCLIProxyAPIQuotaWindowLabel(t, antigravitySummary, "summary-1-weekly", "Gemini 模型 · 每周额度", "65")
 }
 
-func TestCLIProxyAPI额度缓存失败隔离与不支持状态(t *testing.T) {
+func TestCLIProxyAPI额度刷新账号数量与标识校验(t *testing.T) {
+	tooMany := make([]string, MaxAccountQuotaRefreshAccounts+1)
+	for index := range tooMany {
+		tooMany[index] = PublicAccountID(TargetKindCLIProxyAPI, "account-"+string(rune(index+1)))
+	}
+	if _, err := normalizeCLIProxyAPIAccountIDs(tooMany); err == nil {
+		t.Fatal("超过一百个账号的刷新请求应被拒绝")
+	}
+	valid := PublicAccountID(TargetKindCLIProxyAPI, "account-one")
+	normalized, err := normalizeCLIProxyAPIAccountIDs([]string{valid, valid})
+	if err != nil || len(normalized) != 1 || normalized[0] != valid {
+		t.Fatalf("重复账号标识应去重：%#v, %v", normalized, err)
+	}
+	if _, err := normalizeCLIProxyAPIAccountIDs([]string{"raw-auth-index"}); err == nil {
+		t.Fatal("前端不得提交原始上游账号标识")
+	}
+}
+
+func TestCLIProxyAPI常规检测不查额度且按账号选择刷新(t *testing.T) {
 	var calls atomic.Int32
+	calledAccounts := make(map[string]int)
+	var calledMu sync.Mutex
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v0/management/auth-files", func(writer http.ResponseWriter, request *http.Request) {
 		writeTestJSON(writer, map[string]any{"files": []any{
@@ -88,6 +109,10 @@ func TestCLIProxyAPI额度缓存失败隔离与不支持状态(t *testing.T) {
 			map[string]any{
 				"auth_index": "codex-failed", "provider": "codex", "status": "active",
 				"id_token": map[string]any{"chatgpt_account_id": "account-failed"},
+			},
+			map[string]any{
+				"auth_index": "codex-other-page", "provider": "codex", "status": "active",
+				"id_token": map[string]any{"chatgpt_account_id": "account-other-page"},
 			},
 			map[string]any{"auth_index": "claude-no-quota", "provider": "claude", "status": "active"},
 		}})
@@ -103,7 +128,11 @@ func TestCLIProxyAPI额度缓存失败隔离与不支持状态(t *testing.T) {
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if call["auth_index"] == "codex-failed" {
+		authIndex, _ := call["auth_index"].(string)
+		calledMu.Lock()
+		calledAccounts[authIndex]++
+		calledMu.Unlock()
+		if authIndex == "codex-failed" {
 			writeTestJSON(writer, map[string]any{"status_code": 503, "body": `{"message":"temporary"}`})
 			return
 		}
@@ -115,47 +144,56 @@ func TestCLIProxyAPI额度缓存失败隔离与不支持状态(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	clock := time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)
 	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
-	adapter.quotaCache.now = func() time.Time { return clock }
 	target := TargetConfig{
-		ID: "cli-cache", BaseURL: server.URL, AllowPrivateNetwork: true,
+		ID: "cli-page-refresh", BaseURL: server.URL, AllowPrivateNetwork: true,
 		Credential: Credential{AdminKey: "management-secret"},
 	}
-	first, err := adapter.Check(context.Background(), target)
+	checked, err := adapter.Check(context.Background(), target)
 	if err != nil {
-		t.Fatalf("首次检测 CLIProxyAPI 失败：%v", err)
+		t.Fatalf("常规检测 CLIProxyAPI 失败：%v", err)
 	}
-	good := findCLIProxyAPIAccount(t, first.Accounts, "codex-good")
-	failed := findCLIProxyAPIAccount(t, first.Accounts, "codex-failed")
-	unsupported := findCLIProxyAPIAccount(t, first.Accounts, "claude-no-quota")
-	if first.Status != TargetStatusHealthy || good.QuotaState != AccountQuotaStateAvailable || good.Type != "plus" {
-		t.Fatalf("成功额度不应影响账号健康状态，账号=%#v 渠道状态=%s", good, first.Status)
+	if calls.Load() != 0 {
+		t.Fatalf("常规状态检测不应遍历额度接口，实际调用 %d 次", calls.Load())
+	}
+	if checked.Status != TargetStatusHealthy || findCLIProxyAPIAccount(t, checked.Accounts, "codex-good").QuotaState != "" {
+		t.Fatalf("常规检测只应保留健康状态：%#v", checked)
+	}
+	if unsupported := findCLIProxyAPIAccount(t, checked.Accounts, "claude-no-quota"); unsupported.QuotaState != AccountQuotaStateUnsupported {
+		t.Fatalf("无额度接口的账号状态不正确：%#v", unsupported)
+	}
+
+	selectedIDs := []string{
+		PublicAccountID(TargetKindCLIProxyAPI, "codex-good"),
+		PublicAccountID(TargetKindCLIProxyAPI, "codex-failed"),
+		PublicAccountID(TargetKindCLIProxyAPI, "claude-no-quota"),
+	}
+	refreshed, err := adapter.RefreshAccountQuotas(context.Background(), target, selectedIDs)
+	if err != nil {
+		t.Fatalf("刷新当前页额度失败：%v", err)
+	}
+	good := findCLIProxyAPIAccount(t, refreshed, "codex-good")
+	failed := findCLIProxyAPIAccount(t, refreshed, "codex-failed")
+	unsupported := findCLIProxyAPIAccount(t, refreshed, "claude-no-quota")
+	if good.Status != string(TargetStatusHealthy) || good.QuotaState != AccountQuotaStateAvailable || good.Type != "plus" {
+		t.Fatalf("额度刷新不应改变账号健康状态：%#v", good)
 	}
 	assertCLIProxyAPIQuotaWindow(t, good.QuotaWindows, "code-5h", "75", "2026-07-20T09:00:00Z")
 	if failed.Status != string(TargetStatusHealthy) || failed.QuotaState != AccountQuotaStateUnavailable {
 		t.Fatalf("额度读取失败不应改变账号健康状态：%#v", failed)
 	}
 	if unsupported.QuotaState != AccountQuotaStateUnsupported {
-		t.Fatalf("无额度接口的账号状态不正确：%#v", unsupported)
+		t.Fatalf("不支持额度读取的账号状态不正确：%#v", unsupported)
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("只应查询支持额度接口的两个账号，实际调用 %d 次", calls.Load())
-	}
-
-	if _, err := adapter.Check(context.Background(), target); err != nil {
-		t.Fatalf("缓存期内再次检测失败：%v", err)
-	}
-	if calls.Load() != 3 {
-		t.Fatalf("成功额度应命中缓存，失败额度应允许重试，实际调用 %d 次", calls.Load())
+	if calls.Load() != 2 || calledAccounts["codex-other-page"] != 0 {
+		t.Fatalf("只应查询本页支持额度的账号，调用=%d 明细=%#v", calls.Load(), calledAccounts)
 	}
 
-	clock = clock.Add(16 * time.Minute)
-	if _, err := adapter.Check(context.Background(), target); err != nil {
-		t.Fatalf("缓存过期后再次检测失败：%v", err)
+	if _, err := adapter.RefreshAccountQuotas(context.Background(), target, selectedIDs[:1]); err != nil {
+		t.Fatalf("再次刷新当前页额度失败：%v", err)
 	}
-	if calls.Load() != 5 {
-		t.Fatalf("十五分钟缓存过期后应重新读取额度，实际调用 %d 次", calls.Load())
+	if calls.Load() != 3 || calledAccounts["codex-good"] != 2 {
+		t.Fatalf("手动刷新应绕过成功缓存，调用=%d 明细=%#v", calls.Load(), calledAccounts)
 	}
 }
 
@@ -327,10 +365,14 @@ func TestCLIProxyAPI额度查询最多四并发(t *testing.T) {
 	defer server.Close()
 
 	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
-	_, err := adapter.Check(context.Background(), TargetConfig{
+	accountIDs := make([]string, 0, len(accounts))
+	for index := range accounts {
+		accountIDs = append(accountIDs, PublicAccountID(TargetKindCLIProxyAPI, "codex-"+string(rune('a'+index))))
+	}
+	_, err := adapter.RefreshAccountQuotas(context.Background(), TargetConfig{
 		ID: "cli-concurrency", BaseURL: server.URL, AllowPrivateNetwork: true,
 		Credential: Credential{AdminKey: "management-secret"},
-	})
+	}, accountIDs)
 	if err != nil {
 		t.Fatalf("并发额度检测失败：%v", err)
 	}
@@ -380,10 +422,14 @@ func TestCLIProxyAPI慢账号不会长期占用全部额度查询工位(t *testi
 
 	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
 	adapter.quotaRequestTimeout = 80 * time.Millisecond
-	snapshot, err := adapter.Check(context.Background(), TargetConfig{
+	accountIDs := make([]string, 0, len(accounts))
+	for index := range accounts {
+		accountIDs = append(accountIDs, PublicAccountID(TargetKindCLIProxyAPI, "codex-"+string(rune('a'+index))))
+	}
+	refreshed, err := adapter.RefreshAccountQuotas(context.Background(), TargetConfig{
 		ID: "cli-slow", BaseURL: server.URL, AllowPrivateNetwork: true,
 		Credential: Credential{AdminKey: "management-secret"},
-	})
+	}, accountIDs)
 	if err != nil {
 		t.Fatalf("慢账号隔离检测失败：%v", err)
 	}
@@ -391,7 +437,7 @@ func TestCLIProxyAPI慢账号不会长期占用全部额度查询工位(t *testi
 		t.Fatalf("慢账号不应阻止后续账号开始查询，实际调用 %d 次", calls.Load())
 	}
 	for _, externalID := range []string{"codex-e", "codex-f", "codex-g", "codex-h"} {
-		account := findCLIProxyAPIAccount(t, snapshot.Accounts, externalID)
+		account := findCLIProxyAPIAccount(t, refreshed, externalID)
 		if account.QuotaState != AccountQuotaStateAvailable {
 			t.Fatalf("后续账号应正常取得额度：%#v", account)
 		}

@@ -442,7 +442,7 @@ func TestCLIProxyAPI只读聚合并严格白名单(t *testing.T) {
 				"id": "raw-limited-id", "provider": "claude", "account_type": "api_key", "status": "active", "unavailable": true,
 				"next_retry_after": "2099-07-20T00:00:00Z", "status_message": "Bearer raw-status-secret",
 			},
-			map[string]any{"id": "raw-error-id", "provider": "gemini", "status": "error"},
+			map[string]any{"id": "raw-error-id", "provider": "gemini", "status": "error", "status_message": "unauthorized"},
 			map[string]any{"id": "raw-disabled-id", "provider": "qwen", "status": "active", "disabled": true},
 			map[string]any{"id": "raw-pending-id", "provider": "kimi", "status": "pending"},
 			map[string]any{"id": "raw-unknown-id", "provider": "custom", "status": "mystery"},
