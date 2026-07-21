@@ -1,0 +1,88 @@
+name: 手动部署服务器
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 完整容器镜像地址
+        required: true
+        type: string
+      revision:
+        description: 镜像对应的完整提交编号
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: 备份并部署生产服务器
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出部署脚本
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: 安装 SSH 密码助手
+        run: |
+          set -euo pipefail
+          if ! command -v sshpass >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+
+      - name: 校验服务器指纹
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          EXPECTED_FINGERPRINT: SHA256:Hgpy3yK2DPW/3ztvVukc/wn+13fLVezKk72pMwkuJlM
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_PORT"
+          install -d -m 700 "$HOME/.ssh"
+          for attempt in 1 2 3 4 5; do
+            if timeout 20 ssh-keyscan -p "$DEPLOY_PORT" -t ed25519 "$DEPLOY_HOST" > "$HOME/.ssh/known_hosts.new" 2>/dev/null && [ -s "$HOME/.ssh/known_hosts.new" ]; then
+              break
+            fi
+            sleep $((attempt * 2))
+          done
+          test -s "$HOME/.ssh/known_hosts.new"
+          actual_fingerprint="$(ssh-keygen -lf "$HOME/.ssh/known_hosts.new" -E sha256 | awk 'NR == 1 { print $2 }')"
+          test "$actual_fingerprint" = "$EXPECTED_FINGERPRINT"
+          mv "$HOME/.ssh/known_hosts.new" "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: 创建一致性备份并更新容器
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SSHPASS: ${{ secrets.DEPLOY_PASSWORD }}
+          IMAGE: ${{ inputs.image }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^ghcr\.io/zzlye/poolwatch(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]+)$ ]]
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test -n "$DEPLOY_USER"
+          remote_command="$(printf 'bash -s -- %q %q' "$IMAGE" "$REVISION")"
+          sshpass -e ssh -p "$DEPLOY_PORT" \
+            -o BatchMode=no \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=4 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" < scripts/deploy-server.sh
+
+      - name: 验证 HTTPS 页面
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 20 https://jiance.zzlye.xyz/healthz
+          page="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' https://jiance.zzlye.xyz/)"
+          printf '%s' "$page" | grep -q 'assets/index-'
