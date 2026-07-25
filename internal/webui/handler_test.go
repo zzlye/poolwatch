@@ -41,7 +41,7 @@ func TestHandlerServesBrowserHelperPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建前端处理器失败: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/downloads/poolwatch-browser-helper-v1.0.0.zip", nil)
+	request := httptest.NewRequest(http.MethodGet, "/downloads/poolwatch-browser-helper-v1.1.0.zip", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	// ZIP 文件必须作为静态资源返回，不能被前端路由回退替换成页面壳。

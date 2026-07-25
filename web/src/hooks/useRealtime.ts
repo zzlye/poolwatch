@@ -24,10 +24,15 @@ export function useRealtime(enabled: boolean): void {
       // 渠道配置变化可能关闭某个告警指标，告警页也要同步刷新。
       void queryClient.invalidateQueries({ queryKey: ['alerts'] })
     }
+    const refreshSettings = () => {
+      void queryClient.invalidateQueries({ queryKey: ['settings'] })
+      // 邮件配置也通过设置更新事件同步，确保其他设备上的清除和修改及时生效。
+      void queryClient.invalidateQueries({ queryKey: ['email'] })
+    }
     source.addEventListener('snapshot', refreshTargets)
     source.addEventListener('target.updated', refreshTargetConfiguration)
     source.addEventListener('alert', refreshAlerts)
-    source.addEventListener('settings.updated', () => void queryClient.invalidateQueries({ queryKey: ['settings'] }))
+    source.addEventListener('settings.updated', refreshSettings)
 
     return () => source.close()
   }, [enabled, queryClient])

@@ -1,6 +1,8 @@
 package com.zzlye.poolwatch
 
 import com.zzlye.poolwatch.auth.ChannelAuthSecurity
+import com.zzlye.poolwatch.auth.Sub2CaptureGuard
+import com.zzlye.poolwatch.auth.Sub2OAuthTokens
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -30,7 +32,40 @@ class ChannelAuthSecurityTest {
         )
         assertEquals("access.value", tokens?.accessToken)
         assertEquals("refresh+value", tokens?.refreshToken)
+        val refreshOnly = ChannelAuthSecurity.parseSub2Tokens(
+            "https://api.example.com/oauth/callback#refresh_token=refresh-only",
+        )
+        assertEquals("", refreshOnly?.accessToken)
+        assertEquals("refresh-only", refreshOnly?.refreshToken)
         assertNull(ChannelAuthSecurity.parseSub2Tokens("https://api.example.com/oauth/callback#state=ok"))
+    }
+
+    @Test
+    fun `解析Sub2API同源网页存储中的固定令牌`() {
+        val tokens = ChannelAuthSecurity.parseEvaluatedSub2Tokens(
+            "\"access%2Evalue|refresh%2Bvalue\"",
+        )
+        assertEquals("access.value", tokens?.accessToken)
+        assertEquals("refresh+value", tokens?.refreshToken)
+        assertEquals(
+            "refresh-only",
+            ChannelAuthSecurity.parseEvaluatedSub2Tokens("\"|refresh-only\"")?.refreshToken,
+        )
+        assertNull(ChannelAuthSecurity.parseEvaluatedSub2Tokens("\"|\""))
+        assertNull(ChannelAuthSecurity.parseEvaluatedSub2Tokens("\"access%0Ainjected|\""))
+    }
+
+    @Test
+    fun `Sub2API同一令牌只自动提交一次并允许手工重试`() {
+        val guard = Sub2CaptureGuard()
+        val tokens = Sub2OAuthTokens("access-value", "refresh-value")
+
+        assertTrue(guard.shouldCapture(tokens, manual = false))
+        assertFalse(guard.shouldCapture(tokens, manual = false))
+        assertTrue(guard.shouldCapture(tokens, manual = true))
+        assertTrue(guard.shouldCapture(tokens, manual = true))
+        assertFalse(guard.shouldCapture(tokens, manual = false))
+        assertTrue(guard.shouldCapture(tokens.copy(refreshToken = "refresh-rotated"), manual = false))
     }
 
     @Test

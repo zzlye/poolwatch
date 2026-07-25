@@ -6,6 +6,10 @@ const DEFAULT_TRUSTED_ORIGINS = [
   'http://localhost:8080'
 ]
 const BRIDGE_SCRIPT_ID = 'poolwatch-trusted-page-bridge'
+const IMPORT_MESSAGE_KINDS = {
+  POOLWATCH_IMPORT_NEW_API: 'new_api',
+  POOLWATCH_IMPORT_SUB2_API: 'sub2api'
+}
 let bridgeSyncQueue = Promise.resolve()
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -39,14 +43,15 @@ chrome.action.onClicked.addListener(async () => {
 })
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'POOLWATCH_IMPORT_NEW_API') return false
-  importNewAPISession(message, sender)
+  const expectedKind = IMPORT_MESSAGE_KINDS[message?.type]
+  if (!expectedKind) return false
+  importTargetSession(message, sender, expectedKind)
     .then(sendResponse)
     .catch((error) => sendResponse({ ok: false, message: safeErrorMessage(error) }))
   return true
 })
 
-async function importNewAPISession(message, sender) {
+async function importTargetSession(message, sender, expectedKind) {
   // 只接受可信号池监控页面发起的任务，渠道地址必须以服务器保存的任务内容为准。
   const serverOrigin = normalizeTrustedOrigin(message.serverOrigin)
   const senderOrigin = normalizeTrustedOrigin(sender.tab?.url)
@@ -61,7 +66,7 @@ async function importNewAPISession(message, sender) {
   const taskResponse = await fetch(taskURL, { cache: 'no-store' })
   const taskPayload = await readJSON(taskResponse)
   if (!taskResponse.ok) throw new Error(apiMessage(taskPayload, '读取网页登录任务失败。'))
-  if (taskPayload?.kind !== 'new_api' || !taskPayload?.captureToken) throw new Error('网页登录任务与 New API 不匹配。')
+  if (taskPayload?.kind !== expectedKind || !taskPayload?.captureToken) throw new Error('网页登录任务与当前渠道类型不匹配。')
 
   const baseURL = normalizeHTTPURL(taskPayload.baseUrl)
   if (!baseURL) throw new Error('渠道地址格式无效。')
@@ -79,24 +84,13 @@ async function importNewAPISession(message, sender) {
       return { ok: false, code: 'login_required', message: '请在打开的页面完成登录，返回渠道站点后再点击一键读取。' }
     }
 
-    const selfResult = await readNewAPIUser(targetTab.id, baseURL)
-    if (!selfResult.ok || !selfResult.userId) {
+    const credential = expectedKind === 'sub2api'
+      ? await readSub2APITokens(targetTab.id, baseURL)
+      : await readNewAPICredential(targetTab.id, baseURL)
+    if (!credential) {
       leaveTargetOpen = true
       await focusTab(targetTab)
       return { ok: false, code: 'login_required', message: '渠道站点已经打开，请完成登录后回到号池监控再次点击一键读取。' }
-    }
-
-    const selfURL = new URL('/api/user/self', baseURL).toString()
-    const cookies = await chrome.cookies.getAll({ url: selfURL })
-    const cookieHeader = cookies
-      .filter((cookie) => cookie.name && cookie.value !== undefined)
-      .sort((left, right) => (right.path?.length || 0) - (left.path?.length || 0) || left.name.localeCompare(right.name))
-      .map((cookie) => `${cookie.name}=${cookie.value}`)
-      .join('; ')
-    if (!cookieHeader) {
-      leaveTargetOpen = true
-      await focusTab(targetTab)
-      return { ok: false, code: 'login_required', message: '当前站点尚未读取到登录会话，请登录后再次点击一键读取。' }
     }
 
     const captureURL = `${serverOrigin}/api/target-auth/native/${encodeURIComponent(attemptId)}/capture`
@@ -106,15 +100,69 @@ async function importNewAPISession(message, sender) {
         'Content-Type': 'application/json',
         'X-Target-Auth-Token': String(taskPayload.captureToken)
       },
-      body: JSON.stringify({ cookie: cookieHeader, userId: selfResult.userId })
+      body: JSON.stringify(credential)
     })
     const capturePayload = await readJSON(captureResponse)
-    if (!captureResponse.ok) throw new Error(apiMessage(capturePayload, '导入登录会话失败。'))
+    if (!captureResponse.ok) throw new Error(apiMessage(capturePayload, '导入登录状态失败。'))
     if (sender.tab?.id) await focusTab(sender.tab)
-    return { ok: true, attemptId, message: '已读取登录会话，号池监控正在完成校验。' }
+    return {
+      ok: true,
+      attemptId,
+      message: expectedKind === 'sub2api'
+        ? '已读取登录令牌，号池监控正在完成校验。'
+        : '已读取登录会话，号池监控正在完成校验。'
+    }
   } finally {
     if (!leaveTargetOpen) await closeTabQuietly(targetTab.id)
   }
+}
+
+async function readNewAPICredential(tabId, baseURL) {
+  const selfResult = await readNewAPIUser(tabId, baseURL)
+  if (!selfResult.ok || !selfResult.userId) return null
+
+  const selfURL = new URL('/api/user/self', baseURL).toString()
+  const cookies = await chrome.cookies.getAll({ url: selfURL })
+  const cookieHeader = cookies
+    .filter((cookie) => cookie.name && cookie.value !== undefined)
+    .sort((left, right) => (right.path?.length || 0) - (left.path?.length || 0) || left.name.localeCompare(right.name))
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ')
+  return cookieHeader ? { cookie: cookieHeader, userId: selfResult.userId } : null
+}
+
+async function readSub2APITokens(tabId, baseURL) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    args: [baseURL],
+    func: (targetBaseURL) => {
+      try {
+        if (window.location.origin !== new URL(targetBaseURL).origin) return null
+        // 只读取 Sub2API 官方键及已知兼容键，不遍历站点存储中的其他内容。
+        const storages = [window.localStorage, window.sessionStorage]
+        const readFirst = (keys) => {
+          for (const storage of storages) {
+            for (const key of keys) {
+              const value = String(storage.getItem(key) || '').trim()
+              if (value) return value
+            }
+          }
+          return ''
+        }
+        const accessToken = readFirst(['auth_token', 'access_token', 'accessToken'])
+        const refreshToken = readFirst(['refresh_token', 'refreshToken'])
+        return accessToken || refreshToken ? { accessToken, refreshToken } : null
+      } catch {
+        return null
+      }
+    }
+  })
+  const credential = results[0]?.result
+  if (!credential || typeof credential !== 'object') return null
+  const accessToken = String(credential.accessToken || '').trim()
+  const refreshToken = String(credential.refreshToken || '').trim()
+  return accessToken || refreshToken ? { accessToken, refreshToken } : null
 }
 
 async function readNewAPIUser(tabId, baseURL) {

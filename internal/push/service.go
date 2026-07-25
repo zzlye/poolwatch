@@ -189,9 +189,33 @@ func (s *Service) Devices(ctx context.Context) ([]Device, error) {
 	return devices, nil
 }
 
+// DeviceIDs 返回当前仍然有效的推送设备标识，供告警按设备记录独立投递状态。
+func (s *Service) DeviceIDs(ctx context.Context) ([]string, error) {
+	return s.store.ListPushSubscriptionIDs(ctx)
+}
+
 // DeleteDevice 取消一个已保存的浏览器订阅。
 func (s *Service) DeleteDevice(ctx context.Context, id string) error {
 	return s.store.DeletePushSubscription(ctx, id)
+}
+
+// SendDevice 只向指定设备发送一次通知，供告警分发器独立重试失败设备。
+func (s *Service) SendDevice(ctx context.Context, deviceID string, notification Notification) error {
+	payload, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+	saved, err := s.store.GetPushSubscription(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	publicKey, privateKey := s.publicKey, s.privateKey
+	s.mu.RUnlock()
+	if publicKey == "" || privateKey == "" {
+		return errors.New("浏览器推送密钥尚未初始化")
+	}
+	return s.sendOne(ctx, saved, payload, publicKey, privateKey, newPushHTTPClient(s.resolver))
 }
 
 // Send 向所有设备各发送一次通知，并自动移除已失效端点。
@@ -255,20 +279,27 @@ func (s *Service) sendOne(ctx context.Context, saved store.PushSubscription, pay
 		Subscriber: s.subscriber, VAPIDPublicKey: publicKey, VAPIDPrivateKey: privateKey, TTL: 60, HTTPClient: pushClient,
 	})
 	if err != nil {
-		return fmt.Errorf("发送浏览器通知失败: %w", err)
+		// 底层网络错误可能包含带订阅令牌的完整端点，服务边界只返回固定摘要。
+		return errors.New("发送浏览器通知失败")
 	}
 	if response != nil {
 		defer response.Body.Close()
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
-			_ = s.store.DeletePushSubscriptionByEndpoint(ctx, saved.Endpoint)
+			maintenanceContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = s.store.DeletePushSubscriptionByEndpoint(maintenanceContext, saved.Endpoint)
 			return nil
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			return fmt.Errorf("浏览器推送服务返回状态 %d", response.StatusCode)
 		}
 	}
-	return s.store.TouchPushSubscription(ctx, saved.ID, s.now())
+	// 外部推送已经成功后，设备活跃时间只做尽力更新，不能因原请求取消而把通知判为失败并重复发送。
+	maintenanceContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = s.store.TouchPushSubscription(maintenanceContext, saved.ID, s.now())
+	return nil
 }
 
 func validatePushEndpoint(endpoint *url.URL) error {

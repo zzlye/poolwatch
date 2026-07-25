@@ -12,12 +12,19 @@
       button { min-height: 44px; margin-top: 16px; padding: 0 20px; border: 0; border-radius: 8px; background: #147a55; color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
       #status { min-height: 24px; color: #147a55; }
       small { color: #5c6963; }
+      .trust-warning { margin: 18px 0; padding: 14px 16px; border: 2px solid #d97706; border-radius: 10px; background: #fff7ed; color: #7c2d12; }
+      .trust-warning strong { display: block; margin-bottom: 4px; }
+      .trust-warning p { margin: 0; }
     </style>
   </head>
   <body>
     <main>
       <h1>号池监控浏览器助手</h1>
       <p>每行填写一个可信的号池监控地址。浏览器助手只响应这些页面发起的一键读取操作。</p>
+      <div class="trust-warning" role="note">
+        <strong>安全提醒：只信任本人控制的地址</strong>
+        <p>可信地址可以指示助手读取目标渠道的登录状态。只添加由你本人控制并确认可信的号池监控地址，陌生或他人提供的地址请勿加入。</p>
+      </div>
       <label for="origins"><strong>可信地址</strong></label>
       <textarea id="origins" spellcheck="false"></textarea>
       <small>只填写地址来源，例如 https://jiance.zzlye.xyz，不包含后续路径。公网地址需使用 HTTPS，第一行作为助手图标默认打开页面。</small>

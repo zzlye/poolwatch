@@ -153,6 +153,7 @@ private fun ChannelAuthBrowser(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val sub2CaptureGuard = remember { Sub2CaptureGuard() }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var currentHost by remember { mutableStateOf(hostLabel(config.loginUrl)) }
     var message by remember { mutableStateOf("请在渠道页面选择 GitHub、Linux.do 或其他可用方式登录。") }
@@ -177,17 +178,8 @@ private fun ChannelAuthBrowser(
         }
     }
 
-    fun submitSub2(currentUrl: String, manual: Boolean) {
-        if (capturePending || completed) return
-        if (!ChannelAuthSecurity.sameOrigin(currentUrl, config.baseUrl)) {
-            if (manual) message = "请先完成登录并返回渠道站点。"
-            return
-        }
-        val tokens = ChannelAuthSecurity.parseSub2Tokens(currentUrl)
-        if (tokens == null) {
-            if (manual) message = "当前页面没有发现登录令牌，请确认授权已经完成。"
-            return
-        }
+    fun captureSub2(tokens: Sub2OAuthTokens, manual: Boolean) {
+        if (!sub2CaptureGuard.shouldCapture(tokens, manual)) return
         capturePending = true
         message = "正在验证网页登录状态…"
         scope.launch {
@@ -195,6 +187,30 @@ private fun ChannelAuthBrowser(
                 .onSuccess { finishSuccess() }
                 .onFailure { message = it.message ?: "验证网页登录状态失败。" }
             capturePending = false
+        }
+    }
+
+    fun submitSub2(view: WebView, currentUrl: String, manual: Boolean) {
+        if (capturePending || completed) return
+        if (!ChannelAuthSecurity.sameOrigin(currentUrl, config.baseUrl)) {
+            if (manual) message = "请先完成登录并返回渠道站点。"
+            return
+        }
+        ChannelAuthSecurity.parseSub2Tokens(currentUrl)?.let {
+            captureSub2(it, manual)
+            return
+        }
+        capturePending = true
+        // 新版 Sub2API 会把登录令牌写入同源网页存储并清理回调地址，因此再读取固定白名单键。
+        view.evaluateJavascript(SUB2_API_TOKEN_SCRIPT) { rawTokens ->
+            val tokens = ChannelAuthSecurity.parseEvaluatedSub2Tokens(rawTokens)
+            if (tokens == null) {
+                capturePending = false
+                if (manual) message = "当前页面没有发现登录令牌，请确认授权已经完成。"
+                return@evaluateJavascript
+            }
+            capturePending = false
+            captureSub2(tokens, manual)
         }
     }
 
@@ -228,7 +244,7 @@ private fun ChannelAuthBrowser(
     fun submit(view: WebView?, manual: Boolean) {
         val readyView = view ?: return
         val currentUrl = readyView.url.orEmpty()
-        if (config.kind == "sub2api") submitSub2(currentUrl, manual)
+        if (config.kind == "sub2api") submitSub2(readyView, currentUrl, manual)
         else submitNewAPI(readyView, currentUrl, manual)
     }
 
@@ -310,7 +326,7 @@ private fun ChannelAuthBrowser(
                                     ChannelAuthSecurity.parseSub2Tokens(url) != null
                                 ) {
                                     // URL 片段不会发送到服务器，因此在页面脚本清理地址前立即采集。
-                                    submitSub2(url, false)
+                                    submitSub2(view, url, false)
                                 }
                                 return false
                             }
@@ -334,8 +350,16 @@ private fun ChannelAuthBrowser(
                                 val returnedToTarget = ChannelAuthSecurity.sameOrigin(currentUrl, config.baseUrl)
                                 val hasSub2Tokens = config.kind == "sub2api" &&
                                     ChannelAuthSecurity.parseSub2Tokens(currentUrl) != null
-                                if (returnedToTarget && (visitedExternalProvider || hasSub2Tokens)) {
+                                if (returnedToTarget && (config.kind == "sub2api" || visitedExternalProvider || hasSub2Tokens)) {
                                     submit(view, false)
+                                }
+                                if (returnedToTarget && config.kind == "sub2api") {
+                                    // OAuth 回调页可能在加载完成后才异步写入令牌，短时复查可减少手工确认操作。
+                                    listOf(700L, 1_500L, 3_000L).forEach { delayMillis ->
+                                        view.postDelayed({
+                                            if (webView === view && !completed) submit(view, false)
+                                        }, delayMillis)
+                                    }
                                 }
                             }
 
@@ -451,4 +475,8 @@ private fun hostLabel(rawUrl: String): String = runCatching { URI(rawUrl).host }
 
 private const val NEW_API_USER_ID_SCRIPT = """
     (function(){try{var keys=['user','new-api-user','user_info','userInfo'];for(var i=0;i<keys.length;i++){var raw=localStorage.getItem(keys[i]);if(!raw)continue;try{var value=JSON.parse(raw);var id=value&&((value.id)||(value.user_id)||(value.userId)||(value.data&&value.data.id));if(id!==undefined&&id!==null)return String(id);}catch(e){}}var simple=['user_id','userId'];for(var j=0;j<simple.length;j++){var direct=localStorage.getItem(simple[j]);if(direct&&/^\d+$/.test(direct))return direct;}}catch(e){}return '';})()
+"""
+
+private const val SUB2_API_TOKEN_SCRIPT = """
+    (function(){try{var stores=[window.localStorage,window.sessionStorage];var read=function(keys){for(var i=0;i<stores.length;i++){for(var j=0;j<keys.length;j++){var value=String(stores[i].getItem(keys[j])||'').trim();if(value)return value;}}return '';};var access=read(['auth_token','access_token','accessToken']);var refresh=read(['refresh_token','refreshToken']);if(!access&&!refresh)return '';return encodeURIComponent(access)+'|'+encodeURIComponent(refresh);}catch(e){return '';}})()
 """

@@ -1,5 +1,5 @@
 param(
-    [string]$OutputPath = "web\public\downloads\poolwatch-browser-helper-v1.0.0.zip"
+    [string]$OutputPath = "web\public\downloads\poolwatch-browser-helper-v1.1.0.zip"
 )
 
 $ErrorActionPreference = "Stop"

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -43,6 +45,44 @@ func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, 
 		subscriptions = append(subscriptions, subscription)
 	}
 	return subscriptions, rows.Err()
+}
+
+// ListPushSubscriptionIDs 只返回推送设备标识，不读取发送认证字段。
+func (s *Store) ListPushSubscriptionIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM push_subscriptions ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetPushSubscription 返回指定设备的推送订阅和加密认证字段。
+func (s *Store) GetPushSubscription(ctx context.Context, id string) (PushSubscription, error) {
+	var subscription PushSubscription
+	var createdAt, lastUsedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, endpoint, p256dh, auth, device_name, user_agent, created_at, last_used_at
+		FROM push_subscriptions WHERE id = ?`, id).Scan(
+		&subscription.ID, &subscription.Endpoint, &subscription.P256DH, &subscription.Auth,
+		&subscription.DeviceName, &subscription.UserAgent, &createdAt, &lastUsedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PushSubscription{}, errors.New("推送设备不存在")
+	}
+	if err != nil {
+		return PushSubscription{}, err
+	}
+	subscription.CreatedAt = parseTime(createdAt)
+	subscription.LastUsedAt = parseTime(lastUsedAt)
+	return subscription, nil
 }
 
 // DeletePushSubscription 删除一个推送设备。

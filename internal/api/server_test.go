@@ -20,6 +20,7 @@ import (
 	"poolwatch/internal/alerts"
 	"poolwatch/internal/auth"
 	"poolwatch/internal/events"
+	"poolwatch/internal/mailnotify"
 	"poolwatch/internal/monitor"
 	"poolwatch/internal/push"
 	"poolwatch/internal/scheduler"
@@ -393,6 +394,71 @@ func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	}
 }
 
+func TestEmailSettingsAPIEncryptsPasswordAndPreservesBlankValue(t *testing.T) {
+	testServer, database, _ := newAPITestServer(t)
+	defer testServer.Close()
+	defer database.Close()
+	client := testServer.Client()
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+	if status, body := requestJSON(t, client, http.MethodPost, testServer.URL+"/api/setup", map[string]any{
+		"initializationToken": "setup-token", "username": "admin", "password": "long-password-123",
+	}, ""); status != http.StatusCreated {
+		t.Fatalf("准备管理员失败: %d %s", status, body)
+	}
+	payload := map[string]any{
+		"enabled": true, "provider": "qq", "host": "smtp.qq.com", "port": 465, "security": "tls",
+		"username": "sender@example.com", "password": "smtp-api-secret", "fromName": "号池监控",
+		"fromAddress": "sender@example.com", "recipients": []string{"receiver@example.com"},
+	}
+	status, body := requestJSON(t, client, http.MethodPut, testServer.URL+"/api/email", payload, "")
+	if status != http.StatusOK || !strings.Contains(body, `"passwordConfigured":true`) || strings.Contains(body, "smtp-api-secret") {
+		t.Fatalf("保存邮箱配置响应不正确: %d %s", status, body)
+	}
+	encrypted, err := database.GetSetting(context.Background(), "smtp_config_enc")
+	if err != nil || strings.Contains(encrypted, "smtp-api-secret") || strings.Contains(encrypted, "sender@example.com") {
+		t.Fatalf("邮箱配置没有完整加密: %q, %v", encrypted, err)
+	}
+	payload["password"] = ""
+	payload["fromName"] = "新的发件人"
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/email", payload, "")
+	if status != http.StatusOK || !strings.Contains(body, `"passwordConfigured":true`) {
+		t.Fatalf("空密码沿用失败: %d %s", status, body)
+	}
+	status, body = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/email", nil, "")
+	if status != http.StatusOK || !strings.Contains(body, `"fromName":"新的发件人"`) || strings.Contains(body, `"password":`) {
+		t.Fatalf("读取邮箱配置响应不正确: %d %s", status, body)
+	}
+	payload["username"] = "other@example.com"
+	status, body = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/email", payload, "")
+	if status != http.StatusBadRequest || !strings.Contains(body, "重新填写授权码") {
+		t.Fatalf("更换发件账号时没有要求新授权码: %d %s", status, body)
+	}
+	payload["username"] = "sender@example.com"
+	payload["security"] = "plain"
+	status, _ = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/email/test", payload, "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("测试接口没有拒绝明文 SMTP: %d", status)
+	}
+	status, _ = requestJSON(t, client, http.MethodPut, testServer.URL+"/api/email", payload, "https://evil.example")
+	if status != http.StatusForbidden {
+		t.Fatalf("跨站修改邮箱配置未被拒绝: %d", status)
+	}
+	status, _ = requestJSON(t, client, http.MethodDelete, testServer.URL+"/api/email", nil, "https://evil.example")
+	if status != http.StatusForbidden {
+		t.Fatalf("跨站清除邮箱配置未被拒绝: %d", status)
+	}
+	status, body = requestJSON(t, client, http.MethodDelete, testServer.URL+"/api/email", nil, "")
+	if status != http.StatusOK || !strings.Contains(body, `"provider":"qq"`) ||
+		!strings.Contains(body, `"host":"smtp.qq.com"`) || !strings.Contains(body, `"passwordConfigured":false`) {
+		t.Fatalf("清除邮箱配置后没有恢复默认状态: %d %s", status, body)
+	}
+	stored, err := database.GetSetting(context.Background(), "smtp_config_enc")
+	if err != nil || stored != "" {
+		t.Fatalf("清除邮箱配置后仍保留加密凭据: %q, %v", stored, err)
+	}
+}
+
 func TestProtectedAPIRejectsAnonymousRequest(t *testing.T) {
 	testServer, database, _ := newAPITestServer(t)
 	defer testServer.Close()
@@ -491,6 +557,16 @@ func TestCapturedCredentialRejectsInjectedSecrets(t *testing.T) {
 	}
 	if _, err := capturedCredential(monitor.TargetKindSub2API, targetAuthCaptureRequest{AccessToken: strings.Repeat("a", maxImportedTokenBytes+1)}); err == nil {
 		t.Fatal("超长网页登录令牌应被拒绝")
+	}
+}
+
+func TestCapturedCredentialAllowsSub2APIRefreshTokenOnly(t *testing.T) {
+	credential, err := capturedCredential(monitor.TargetKindSub2API, targetAuthCaptureRequest{RefreshToken: "oauth-refresh-only"})
+	if err != nil {
+		t.Fatalf("仅包含刷新令牌的 Sub2API 网页凭据应被接受: %v", err)
+	}
+	if credential.AccessToken != "" || credential.RefreshToken != "oauth-refresh-only" {
+		t.Fatalf("Sub2API 刷新令牌凭据解析结果不正确: %#v", credential)
 	}
 }
 
@@ -694,11 +770,12 @@ func newAPITestServerWithPrivateTargets(t *testing.T, allowPrivateTargets bool) 
 		t.Fatalf("初始化推送失败: %v", err)
 	}
 	hub := events.NewHub()
+	emailService := mailnotify.NewService(database, vault, "", allowPrivateTargets)
 	alertEngine := alerts.NewEngine(database, nil)
 	schedulerService := scheduler.NewService(database, vault, apiTestRunner{}, alertEngine, allowPrivateTargets)
 	server := NewServer(Dependencies{
 		Store: database, Vault: vault, Auth: authService, Scheduler: schedulerService,
-		Push: pushService, Events: hub, Static: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		Push: pushService, Email: emailService, Events: hub, Static: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 			response.WriteHeader(http.StatusOK)
 		}),
 		AllowPrivateTargets: allowPrivateTargets,

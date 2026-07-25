@@ -178,6 +178,12 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+// DeleteSetting 删除一个系统设置及其保存内容。
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

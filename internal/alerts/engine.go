@@ -18,16 +18,18 @@ import (
 
 // Notification 是告警状态机产生的一次通知事件。
 type Notification struct {
-	AlertID   string `json:"alertId"`
-	TargetID  string `json:"targetId"`
-	Type      string `json:"type"`
-	Title     string `json:"title"`
-	Message   string `json:"message"`
-	Severity  string `json:"severity"`
-	Recovered bool   `json:"recovered"`
+	AlertID    string    `json:"alertId"`
+	TargetID   string    `json:"targetId"`
+	TargetName string    `json:"targetName"`
+	Type       string    `json:"type"`
+	Title      string    `json:"title"`
+	Message    string    `json:"message"`
+	Severity   string    `json:"severity"`
+	Recovered  bool      `json:"recovered"`
+	OccurredAt time.Time `json:"occurredAt"`
 }
 
-// Notifier 向 SSE 与浏览器推送转发新事件。
+// Notifier 向已经配置的通知通道转发新事件。
 type Notifier interface {
 	Notify(context.Context, Notification) error
 }
@@ -205,7 +207,7 @@ func (e *Engine) RetryPending(ctx context.Context, limit int) error {
 		} else if item.Type == string(monitor.AlertTypeRecovered) {
 			severity = "info"
 		}
-		e.notify(ctx, item.Alert, severity, item.Type == string(monitor.AlertTypeRecovered))
+		e.notify(ctx, item.Alert, item.TargetName, severity, item.Type == string(monitor.AlertTypeRecovered))
 	}
 	return nil
 }
@@ -241,7 +243,7 @@ func (e *Engine) openIncident(ctx context.Context, target store.Target, alertTyp
 	if err := e.store.CreateAlert(ctx, alert); err != nil {
 		return err
 	}
-	e.notify(ctx, alert, severity, false)
+	e.notify(ctx, alert, target.Name, severity, false)
 	return nil
 }
 
@@ -268,15 +270,15 @@ func (e *Engine) recoverIncident(ctx context.Context, target store.Target, alert
 	if err := e.store.CreateAlert(ctx, recovery); err != nil {
 		return err
 	}
-	e.notify(ctx, recovery, "info", true)
+	e.notify(ctx, recovery, target.Name, "info", true)
 	return nil
 }
 
-func (e *Engine) notify(ctx context.Context, alert store.Alert, severity string, recovered bool) {
+func (e *Engine) notify(ctx context.Context, alert store.Alert, targetName, severity string, recovered bool) {
 	if e.notifier != nil {
 		if err := e.notifier.Notify(ctx, Notification{
-			AlertID: alert.ID, TargetID: alert.TargetID, Type: alert.Type, Title: alert.Title,
-			Message: alert.Message, Severity: severity, Recovered: recovered,
+			AlertID: alert.ID, TargetID: alert.TargetID, TargetName: targetName, Type: alert.Type, Title: alert.Title,
+			Message: alert.Message, Severity: severity, Recovered: recovered, OccurredAt: alert.OpenedAt,
 		}); err != nil {
 			return
 		}

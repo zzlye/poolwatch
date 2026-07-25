@@ -1,18 +1,211 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, Check, Copy, KeyRound, Laptop, LoaderCircle, Moon, Save, Send, ShieldCheck, Smartphone, Sun, Trash2 } from 'lucide-react'
+import { Bell, Check, Copy, KeyRound, Laptop, LoaderCircle, Mail, Moon, Save, Send, ShieldCheck, Smartphone, Sun, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { useTheme } from '../hooks/useTheme'
 import { canUsePush, enablePush } from '../lib/push'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
-import type { Settings, ThemePreference, TotpSetup } from '../types'
+import type { EmailProvider, EmailSecurity, EmailSettings, EmailSettingsInput, Settings, ThemePreference, TotpSetup } from '../types'
 
 const themeOptions: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
   { value: 'system', label: '跟随系统', icon: Laptop },
   { value: 'light', label: '浅色', icon: Sun },
   { value: 'dark', label: '深色', icon: Moon }
 ]
+
+const emailProviderOptions: Array<{ value: EmailProvider; label: string; description: string }> = [
+  { value: 'qq', label: 'QQ 邮箱', description: '使用 QQ 邮箱设置中的 SMTP 授权码。' },
+  { value: '163', label: '163 邮箱', description: '使用 163 邮箱设置中的客户端授权码。' },
+  { value: 'gmail', label: 'Gmail', description: '开启二步验证后使用应用专用密码。' },
+  { value: 'outlook', label: 'Outlook', description: '使用支持 SMTP 登录的 Outlook 邮箱。' },
+  { value: 'custom', label: '自定义 SMTP', description: '手工填写发件服务器及连接安全方式。' }
+]
+
+const emailProviderPresets: Record<Exclude<EmailProvider, 'custom'>, { host: string; port: number; security: EmailSecurity }> = {
+  qq: { host: 'smtp.qq.com', port: 465, security: 'tls' },
+  '163': { host: 'smtp.163.com', port: 465, security: 'tls' },
+  gmail: { host: 'smtp.gmail.com', port: 465, security: 'tls' },
+  outlook: { host: 'smtp.office365.com', port: 587, security: 'starttls' }
+}
+
+interface EmailFormState extends Omit<EmailSettings, 'recipients'> {
+  password: string
+  recipientsText: string
+}
+
+function toEmailForm(settings: EmailSettings): EmailFormState {
+  return { ...settings, password: '', recipientsText: settings.recipients.join('\n') }
+}
+
+function parseEmailRecipients(value: string): string[] {
+  return [...new Set(value.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean))]
+}
+
+function toEmailInput(form: EmailFormState): EmailSettingsInput {
+  return {
+    enabled: form.enabled,
+    provider: form.provider,
+    host: form.host.trim(),
+    port: form.port,
+    security: form.security,
+    username: form.username.trim(),
+    ...(form.password ? { password: form.password } : {}),
+    fromName: form.fromName.trim(),
+    fromAddress: form.fromAddress.trim(),
+    recipients: parseEmailRecipients(form.recipientsText)
+  }
+}
+
+// 已保存授权码只绑定到保存时的服务商、服务器和发件账号。
+function canReuseEmailPassword(form: EmailFormState, saved?: EmailSettings): boolean {
+  if (!saved?.passwordConfigured) return false
+  return form.provider === saved.provider && form.host.trim().toLowerCase().replace(/\.$/, '') === saved.host.trim().toLowerCase().replace(/\.$/, '') &&
+    form.port === saved.port && form.security === saved.security && form.username.trim() === saved.username.trim()
+}
+
+function validateEmailForm(form: EmailFormState, requireComplete: boolean, passwordReusable: boolean): string {
+  if (!requireComplete) {
+    return form.passwordConfigured && !passwordReusable && !form.password
+      ? '发件服务商、服务器或账号已变更，请重新填写 SMTP 授权码或应用密码。'
+      : ''
+  }
+  if (!form.host.trim()) return '请填写 SMTP 服务器地址。'
+  if (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535) return 'SMTP 端口需要在 1 至 65535 之间。'
+  if (!form.username.trim()) return '请填写发件邮箱账号。'
+  if (!passwordReusable && !form.password) {
+    return form.passwordConfigured
+      ? '发件服务商、服务器或账号已变更，请重新填写 SMTP 授权码或应用密码。'
+      : '请填写 SMTP 授权码或应用密码。'
+  }
+  if (!/^\S+@\S+\.\S+$/.test(form.fromAddress.trim())) return '请填写有效的发件邮箱地址。'
+  const recipients = parseEmailRecipients(form.recipientsText)
+  if (!recipients.length) return '请至少填写一个收件邮箱。'
+  if (recipients.some((address) => !/^\S+@\S+\.\S+$/.test(address))) return '收件邮箱格式有误，请每行填写一个邮箱。'
+  return ''
+}
+
+function EmailSettingsSection() {
+  const queryClient = useQueryClient()
+  const emailQuery = useQuery({ queryKey: ['email'], queryFn: api.emailSettings })
+  const [form, setForm] = useState<EmailFormState | null>(null)
+  const [validationError, setValidationError] = useState('')
+
+  useEffect(() => {
+    if (emailQuery.data) setForm(toEmailForm(emailQuery.data))
+  }, [emailQuery.data])
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: EmailSettingsInput) => api.updateEmailSettings(payload),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(['email'], settings)
+      setForm(toEmailForm(settings))
+    }
+  })
+  const testMutation = useMutation({ mutationFn: (payload: EmailSettingsInput) => api.testEmailSettings(payload) })
+  const clearMutation = useMutation({
+    mutationFn: api.deleteEmailSettings,
+    onSuccess: (settings) => {
+      queryClient.setQueryData(['email'], settings)
+      setForm(toEmailForm(settings))
+      saveMutation.reset()
+      testMutation.reset()
+    }
+  })
+
+  const passwordReusable = form ? canReuseEmailPassword(form, emailQuery.data) : false
+
+  const changeProvider = (provider: EmailProvider) => {
+    setValidationError('')
+    setForm((current) => {
+      if (!current) return current
+      if (provider === 'custom') return { ...current, provider, password: '' }
+      return { ...current, provider, ...emailProviderPresets[provider], password: '' }
+    })
+  }
+
+  const changeUsername = (username: string) => {
+    setValidationError('')
+    setForm((current) => {
+      if (!current) return current
+      const syncFromAddress = !current.fromAddress || current.fromAddress === current.username
+      const currentRecipients = current.recipientsText.trim()
+      const syncRecipients = !currentRecipients || currentRecipients === current.username
+      return {
+        ...current,
+        username,
+        password: username === current.username ? current.password : '',
+        fromAddress: syncFromAddress ? username : current.fromAddress,
+        recipientsText: syncRecipients ? username : current.recipientsText
+      }
+    })
+  }
+
+  const submitEmailSettings = (event: FormEvent) => {
+    event.preventDefault()
+    if (!form) return
+    const message = validateEmailForm(form, form.enabled, passwordReusable)
+    setValidationError(message)
+    if (!message) saveMutation.mutate(toEmailInput(form))
+  }
+
+  const sendTestEmail = () => {
+    if (!form) return
+    const message = validateEmailForm(form, true, passwordReusable)
+    setValidationError(message)
+    if (!message) testMutation.mutate(toEmailInput(form))
+  }
+
+  const clearEmailSettings = () => {
+    if (!window.confirm('确定清除邮件设置和已保存的授权码吗？清除后邮件提醒会停止。')) return
+    setValidationError('')
+    clearMutation.mutate()
+  }
+
+  const operationPending = saveMutation.isPending || testMutation.isPending || clearMutation.isPending
+
+  return (
+    <section className="settings-section" aria-labelledby="email-title">
+      <div className="settings-heading"><span className="settings-icon"><Mail aria-hidden="true" /></span><div><h2 id="email-title">邮件提醒</h2><p>告警和恢复事件可同时发送到一个或多个邮箱。</p></div></div>
+      <div className="email-free-note"><strong>无需额外付费接口</strong><span>可直接使用 QQ、163、Gmail 或 Outlook 邮箱自带的 SMTP 发信功能。</span></div>
+
+      {emailQuery.isPending ? <div className="email-settings-state"><LoaderCircle className="spin" aria-hidden="true" size={20} /><span>正在读取邮件设置</span></div> : null}
+      {emailQuery.isError ? <div className="email-settings-state error"><span>{emailQuery.error.message}</span><button className="button secondary" type="button" onClick={() => void emailQuery.refetch()}>重新读取</button></div> : null}
+
+      {form ? (
+        <form className="settings-form email-settings-form" onSubmit={submitEmailSettings} noValidate>
+          <label className="toggle-row span-2"><input type="checkbox" checked={form.enabled} onChange={(event) => { setValidationError(''); setForm({ ...form, enabled: event.target.checked }) }} aria-label="启用邮件提醒" /><span><strong>启用邮件提醒</strong><small>开启后，新告警和恢复通知会由服务器发送邮件；保存前可先测试当前填写的设置。</small></span></label>
+
+          <label className="field"><span>邮箱服务商</span><select value={form.provider} onChange={(event) => changeProvider(event.target.value as EmailProvider)}>{emailProviderOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>{emailProviderOptions.find((option) => option.value === form.provider)?.description}</small></label>
+          <label className="field"><span>发件邮箱账号</span><input type="email" inputMode="email" autoComplete="email" value={form.username} onChange={(event) => changeUsername(event.target.value)} placeholder="name@example.com" /></label>
+
+          <label className="field"><span>SMTP 服务器</span><input value={form.host} readOnly={form.provider !== 'custom'} onChange={(event) => { setValidationError(''); setForm({ ...form, host: event.target.value, password: event.target.value === form.host ? form.password : '' }) }} placeholder="smtp.example.com" /></label>
+          <label className="field"><span>SMTP 端口</span><input type="number" min="1" max="65535" inputMode="numeric" value={form.port} readOnly={form.provider !== 'custom'} onChange={(event) => { const port = Number(event.target.value); setValidationError(''); setForm({ ...form, port, password: port === form.port ? form.password : '' }) }} /></label>
+          <label className="field"><span>连接安全</span><select value={form.security} disabled={form.provider !== 'custom'} onChange={(event) => { const security = event.target.value as EmailSecurity; setValidationError(''); setForm({ ...form, security, password: security === form.security ? form.password : '' }) }}><option value="tls">SSL/TLS</option><option value="starttls">STARTTLS</option></select></label>
+          <label className="field"><span>SMTP 授权码或应用密码 <em>{passwordReusable ? '已配置，认证身份未变时可留空沿用' : form.passwordConfigured ? '认证身份已变更，请重新填写' : '首次配置必填'}</em></span><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => { setValidationError(''); setForm({ ...form, password: event.target.value }) }} placeholder={passwordReusable ? '留空表示保持现有授权码' : '请输入新的授权码或应用密码'} /><small>更换服务商、服务器、端口、连接安全或发件账号后，需要重新填写。</small></label>
+
+          <label className="field"><span>发件人名称 <em>可选</em></span><input value={form.fromName} onChange={(event) => { setValidationError(''); setForm({ ...form, fromName: event.target.value }) }} placeholder="号池监控" /></label>
+          <label className="field"><span>发件邮箱地址</span><input type="email" inputMode="email" autoComplete="email" value={form.fromAddress} onChange={(event) => { setValidationError(''); setForm({ ...form, fromAddress: event.target.value }) }} placeholder="name@example.com" /></label>
+          <label className="field span-2"><span>收件邮箱</span><textarea rows={3} value={form.recipientsText} onChange={(event) => { setValidationError(''); setForm({ ...form, recipientsText: event.target.value }) }} inputMode="email" autoComplete="email" placeholder={'owner@example.com\nbackup@example.com'} /><small>每行填写一个邮箱，也可以使用逗号或分号分隔。</small></label>
+
+          {validationError ? <div className="span-2"><InlineMessage tone="danger">{validationError}</InlineMessage></div> : null}
+          {saveMutation.error ? <div className="span-2"><InlineMessage tone="danger">保存邮件设置失败：{saveMutation.error.message}</InlineMessage></div> : null}
+          {saveMutation.isSuccess ? <div className="span-2"><InlineMessage tone="success">邮件设置已保存。</InlineMessage></div> : null}
+          {testMutation.error ? <div className="span-2"><InlineMessage tone="danger">测试邮件发送失败：{testMutation.error.message}</InlineMessage></div> : null}
+          {testMutation.isSuccess ? <div className="span-2"><InlineMessage tone="success">测试邮件已发送，请检查收件箱和垃圾邮件目录。</InlineMessage></div> : null}
+          {clearMutation.error ? <div className="span-2"><InlineMessage tone="danger">清除邮件设置失败：{clearMutation.error.message}</InlineMessage></div> : null}
+          {clearMutation.isSuccess ? <div className="span-2"><InlineMessage tone="success">邮件设置和已保存的授权码已清除。</InlineMessage></div> : null}
+
+          <div className="email-settings-actions span-2">
+            <button className="button primary" type="submit" disabled={operationPending}>{saveMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Save aria-hidden="true" size={18} />}{saveMutation.isPending ? '正在保存' : '保存邮件设置'}</button>
+            <button className="button secondary" type="button" disabled={operationPending} onClick={sendTestEmail}>{testMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Send aria-hidden="true" size={18} />}{testMutation.isPending ? '正在发送' : '发送测试邮件'}</button>
+            <button className="button danger" type="button" disabled={operationPending} onClick={clearEmailSettings}>{clearMutation.isPending ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Trash2 aria-hidden="true" size={18} />}{clearMutation.isPending ? '正在清除' : '清除邮件设置'}</button>
+          </div>
+        </form>
+      ) : null}
+    </section>
+  )
+}
 
 export default function SettingsPage() {
   const queryClient = useQueryClient()
@@ -66,7 +259,7 @@ export default function SettingsPage() {
 
   return (
     <div className="page-stack settings-page">
-      <PageHeader title="系统与安全" description="调整检测保留策略、界面主题、推送设备和管理员保护。" />
+      <PageHeader title="系统与安全" description="调整检测保留策略、界面主题、通知方式和管理员保护。" />
 
       <section className="settings-section" aria-labelledby="general-title">
         <div className="settings-heading"><span className="settings-icon"><Save aria-hidden="true" /></span><div><h2 id="general-title">常规设置</h2><p>这些设置由服务器统一应用到所有前端。</p></div></div>
@@ -96,6 +289,8 @@ export default function SettingsPage() {
         {pushTestMutation.error ? <InlineMessage tone="danger">{pushTestMutation.error.message}</InlineMessage> : null}
         {pushQuery.data.devices.length ? <div className="device-list">{pushQuery.data.devices.map((device) => <article key={device.id}><span className="device-icon">{device.userAgent.toLowerCase().includes('android') ? <Smartphone aria-hidden="true" /> : <Laptop aria-hidden="true" />}</span><div><strong>{device.name}{device.current ? <small>当前</small> : null}</strong><span>{device.userAgent}</span><span>最近使用 {formatRelativeTime(device.lastSeenAt ?? device.createdAt)}</span></div><button className="icon-button danger-icon" type="button" aria-label={`移除 ${device.name}`} disabled={removeDeviceMutation.isPending} onClick={() => removeDeviceMutation.mutate(device.id)}><Trash2 aria-hidden="true" size={18} /></button></article>)}</div> : <EmptyState title="还没有推送设备" description="在常用电脑和安卓手机上分别打开本页并启用。" />}
       </section>
+
+      <EmailSettingsSection />
 
       <section className="settings-section" aria-labelledby="security-title">
         <div className="settings-heading"><span className="settings-icon"><ShieldCheck aria-hidden="true" /></span><div><h2 id="security-title">管理员二步验证</h2><p>登录时可使用认证器验证码，恢复码用于设备遗失时登录。</p></div></div>

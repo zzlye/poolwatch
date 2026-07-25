@@ -11,7 +11,7 @@ COPY browser-extension/ /src/browser-extension/
 # 始终从浏览器助手源码生成下载包，避免安装包与源码版本不一致。
 RUN mkdir -p public/downloads \
     && cd /src/browser-extension \
-    && zip -q -r /src/web/public/downloads/poolwatch-browser-helper-v1.0.0.zip .
+    && zip -q -r /src/web/public/downloads/poolwatch-browser-helper-v1.1.0.zip .
 RUN npm run build
 
 # 构建服务端并嵌入前端资源

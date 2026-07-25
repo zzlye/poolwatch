@@ -2,9 +2,11 @@ package push
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -93,6 +95,96 @@ func TestPushSubscription拒绝非公网地址(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "公网") {
 		t.Fatalf("非公网推送地址未被拒绝: %v", err)
+	}
+}
+
+func TestPushService按设备发送(t *testing.T) {
+	database, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("创建保险箱失败: %v", err)
+	}
+	ctx := context.Background()
+	service := NewService(database, vault, "https://monitor.example.com")
+	service.resolver = staticResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
+	if err := service.EnsureKeys(ctx); err != nil {
+		t.Fatalf("初始化推送密钥失败: %v", err)
+	}
+	for _, endpoint := range []string{
+		"https://push.example.com/subscription/computer",
+		"https://push.example.com/subscription/phone",
+	} {
+		if err := service.Subscribe(ctx, SubscriptionInput{
+			Endpoint: endpoint, P256DH: "browser-public-key", Auth: "browser-auth-secret", Name: endpoint,
+		}); err != nil {
+			t.Fatalf("保存推送订阅失败: %v", err)
+		}
+	}
+	ids, err := service.DeviceIDs(ctx)
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("读取设备标识失败: %#v, %v", ids, err)
+	}
+	slices.Sort(ids)
+	subscriptions, err := database.ListPushSubscriptions(ctx)
+	if err != nil {
+		t.Fatalf("读取推送订阅失败: %v", err)
+	}
+	endpointByID := make(map[string]string, len(subscriptions))
+	for _, subscription := range subscriptions {
+		endpointByID[subscription.ID] = subscription.Endpoint
+	}
+	sentEndpoints := make([]string, 0, 1)
+	service.send = func(_ context.Context, _ []byte, subscription *webpush.Subscription, _ *webpush.Options) (*http.Response, error) {
+		sentEndpoints = append(sentEndpoints, subscription.Endpoint)
+		return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}
+	if err := service.SendDevice(ctx, ids[0], Notification{Title: "设备测试"}); err != nil {
+		t.Fatalf("按设备发送失败: %v", err)
+	}
+	if len(sentEndpoints) != 1 || sentEndpoints[0] != endpointByID[ids[0]] {
+		t.Fatalf("通知发送到了错误设备: %#v", sentEndpoints)
+	}
+}
+
+func TestPushSendError不泄露订阅端点(t *testing.T) {
+	database, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer database.Close()
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("创建保险箱失败: %v", err)
+	}
+	ctx := context.Background()
+	service := NewService(database, vault, "https://monitor.example.com")
+	service.resolver = staticResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
+	if err := service.EnsureKeys(ctx); err != nil {
+		t.Fatalf("初始化推送密钥失败: %v", err)
+	}
+	const endpoint = "https://push.example.com/subscription/SECRET_ENDPOINT_TOKEN"
+	if err := service.Subscribe(ctx, SubscriptionInput{
+		Endpoint: endpoint, P256DH: "browser-public-key", Auth: "browser-auth-secret", Name: "测试设备",
+	}); err != nil {
+		t.Fatalf("保存推送订阅失败: %v", err)
+	}
+	ids, err := service.DeviceIDs(ctx)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("读取推送设备失败: %#v, %v", ids, err)
+	}
+	service.send = func(_ context.Context, _ []byte, _ *webpush.Subscription, _ *webpush.Options) (*http.Response, error) {
+		return nil, errors.New(`Post "https://push.example.com/subscription/SECRET_ENDPOINT_TOKEN": connection reset`)
+	}
+	sendErr := service.SendDevice(ctx, ids[0], Notification{Title: "测试"})
+	if sendErr == nil || sendErr.Error() != "发送浏览器通知失败" {
+		t.Fatalf("推送错误没有在服务边界归一化: %v", sendErr)
+	}
+	if strings.Contains(sendErr.Error(), "SECRET_ENDPOINT_TOKEN") || strings.Contains(sendErr.Error(), endpoint) {
+		t.Fatalf("推送错误泄露了订阅端点: %v", sendErr)
 	}
 }
 

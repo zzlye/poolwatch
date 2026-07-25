@@ -398,8 +398,8 @@ func capturedCredential(kind monitor.TargetKind, body targetAuthCaptureRequest) 
 	case monitor.TargetKindSub2API:
 		accessToken := strings.TrimSpace(body.AccessToken)
 		refreshToken := strings.TrimSpace(body.RefreshToken)
-		if accessToken == "" {
-			return monitor.Credential{}, errors.New("Sub2API 网页登录缺少访问令牌")
+		if accessToken == "" && refreshToken == "" {
+			return monitor.Credential{}, errors.New("Sub2API 网页登录缺少访问令牌或刷新令牌")
 		}
 		if len(accessToken) > maxImportedTokenBytes || len(refreshToken) > maxImportedTokenBytes {
 			return monitor.Credential{}, errors.New("网页登录令牌超过 64 KB 限制")

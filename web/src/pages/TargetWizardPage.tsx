@@ -9,7 +9,10 @@ import { metricLabels, targetKindLabels } from '../types'
 
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
 // 浏览器助手压缩包随页面一起发布，桌面端安装后即可读取当前填写站点的会话。
-const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.0.0.zip'
+const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.1.0.zip'
+const browserHelperInstallMessage = '安装浏览器助手并刷新本页后，即可一键读取已登录站点。'
+const browserHelperUpdateMessage = '当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。'
+const androidHTTPSMessage = '安卓端网页登录仅支持 HTTPS 渠道地址。请返回上一步填写 HTTPS 地址，或使用桌面端浏览器助手导入当前登录状态。'
 
 interface BrowserHelperResult {
   source: 'poolwatch-extension'
@@ -19,6 +22,28 @@ interface BrowserHelperResult {
   ok: boolean
   code?: string
   message?: string
+}
+
+interface BrowserHelperReady {
+  source: 'poolwatch-extension'
+  type: 'POOLWATCH_BROWSER_HELPER_READY'
+  version?: string
+  capabilities?: string[]
+}
+
+function supportsBrowserHelper(kind: TargetKind, capabilities: string[]): boolean {
+  // 旧版助手没有能力列表，仅保留既有的 New API 一键读取兼容性。
+  return kind === 'new_api'
+    ? capabilities.length === 0 || capabilities.includes('new_api')
+    : capabilities.includes('sub2api')
+}
+
+function isHTTPSAddress(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 const newAPISubscriptionThreshold: ThresholdDraft = {
@@ -144,7 +169,7 @@ export function parseSub2APIOAuthCallback(value: string, expectedBaseUrl = ''): 
   const fragment = new URLSearchParams(parsed.hash.replace(/^#/, ''))
   const accessToken = fragment.get('access_token')?.trim() ?? ''
   const refreshToken = fragment.get('refresh_token')?.trim() ?? ''
-  if (!accessToken) throw new Error('回调地址的 fragment 中没有 access_token。')
+  if (!accessToken && !refreshToken) throw new Error('回调地址的 fragment 中没有访问令牌或刷新令牌。')
   if (accessToken.length > 65536 || refreshToken.length > 65536 || /[\r\n]/.test(accessToken + refreshToken)) {
     throw new Error('OAuth 回调中的令牌格式无效。')
   }
@@ -239,7 +264,7 @@ function BrowserAuthorizationFields({
   const [callbackUrl, setCallbackUrl] = useState('')
   const [callbackError, setCallbackError] = useState('')
   const [callbackImported, setCallbackImported] = useState(false)
-  const [browserHelperReady, setBrowserHelperReady] = useState(false)
+  const [browserHelperCapabilities, setBrowserHelperCapabilities] = useState<string[] | null>(null)
   const [browserHelperMessage, setBrowserHelperMessage] = useState('')
   const [browserHelperImporting, setBrowserHelperImporting] = useState(false)
   const [showBrowserHelperInstall, setShowBrowserHelperInstall] = useState(false)
@@ -247,6 +272,10 @@ function BrowserAuthorizationFields({
   const helperAttemptId = useRef('')
   const helperAfterCreate = useRef(false)
   const helperTimeout = useRef(0)
+  const browserHelperDetected = browserHelperCapabilities !== null
+  const detectedCapabilities = browserHelperCapabilities ?? []
+  const browserHelperReady = browserHelperDetected && supportsBrowserHelper(draft.kind, detectedCapabilities)
+  const androidRequiresHTTPS = isAndroidApp && !isHTTPSAddress(draft.baseUrl)
 
   const applyAttempt = (next: TargetAuthAttempt) => {
     if (!isCurrentAuthTarget(draft.kind, draft.baseUrl)) return false
@@ -279,7 +308,7 @@ function BrowserAuthorizationFields({
     }, 30000)
     window.postMessage({
       source: 'poolwatch-page',
-      type: 'POOLWATCH_IMPORT_NEW_API',
+      type: draft.kind === 'sub2api' ? 'POOLWATCH_IMPORT_SUB2_API' : 'POOLWATCH_IMPORT_NEW_API',
       requestId,
       attemptId: next.id
     }, window.location.origin)
@@ -332,15 +361,28 @@ function BrowserAuthorizationFields({
   }, [attempt?.id, attempt?.status])
 
   useEffect(() => {
-    if (isAndroidApp || draft.kind !== 'new_api') return
+    if (isAndroidApp) return
+    setBrowserHelperCapabilities(null)
     const announce = () => window.postMessage({ source: 'poolwatch-page', type: 'POOLWATCH_BROWSER_HELPER_PING' }, window.location.origin)
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== window.location.origin) return
       const message = event.data
       if (message?.source !== 'poolwatch-extension') return
       if (message.type === 'POOLWATCH_BROWSER_HELPER_READY') {
-        setBrowserHelperReady(true)
-        setShowBrowserHelperInstall(false)
+        const ready = message as BrowserHelperReady
+        const capabilities = Array.isArray(ready.capabilities)
+          ? [...new Set(ready.capabilities.filter((item): item is string => typeof item === 'string'))]
+          : []
+        const readyForCurrentKind = supportsBrowserHelper(draft.kind, capabilities)
+        setBrowserHelperCapabilities(capabilities)
+        if (readyForCurrentKind) {
+          setShowBrowserHelperInstall(false)
+          // 心跳只清理安装类提示，保留读取中、成功和失败结果供用户查看。
+          setBrowserHelperMessage((current) => current === browserHelperInstallMessage || current === browserHelperUpdateMessage ? '' : current)
+        } else {
+          setShowBrowserHelperInstall(true)
+          setBrowserHelperMessage(browserHelperUpdateMessage)
+        }
         return
       }
       if (message.type !== 'POOLWATCH_IMPORT_RESULT' || message.requestId !== helperRequestId.current) return
@@ -389,7 +431,9 @@ function BrowserAuthorizationFields({
     setCallbackError('')
     if (!browserHelperReady) {
       setShowBrowserHelperInstall(true)
-      setBrowserHelperMessage('安装浏览器助手并刷新本页后，即可一键读取已登录站点。')
+      setBrowserHelperMessage(browserHelperDetected
+        ? browserHelperUpdateMessage
+        : browserHelperInstallMessage)
       return
     }
     setShowBrowserHelperInstall(false)
@@ -432,29 +476,46 @@ function BrowserAuthorizationFields({
         <div><strong>渠道网页登录</strong><small>登录页面由渠道站点提供，号池监控不会接触第三方账号密码。</small></div>
         {attempt?.status === 'ready' || (configured && !attempt) ? <span className="configured-badge"><Check aria-hidden="true" size={15} />已配置</span> : null}
       </div>
-      {!isAndroidApp && draft.kind === 'new_api' ? (
+      {!isAndroidApp ? (
         <div className="browser-helper-card">
           <div className="browser-helper-title">
-            <div><strong>读取当前填写地址</strong><small>只读取第一步填写的渠道地址，从当前浏览器中取得该站点的会话和用户 ID。</small></div>
-            <span className={browserHelperReady ? 'configured-badge' : 'helper-status-badge'}>{browserHelperReady ? <><Check aria-hidden="true" size={15} />已连接</> : '待安装'}</span>
+            <div>
+              <strong>读取当前填写地址</strong>
+              <small>{draft.kind === 'sub2api'
+                ? '只读取第一步填写的渠道地址，从当前浏览器中取得该站点的访问令牌和刷新令牌。'
+                : '只读取第一步填写的渠道地址，从当前浏览器中取得该站点的会话和用户 ID。'}</small>
+            </div>
+            <span className={browserHelperReady ? 'configured-badge' : 'helper-status-badge'}>
+              {browserHelperReady
+                ? <><Check aria-hidden="true" size={15} />已连接</>
+                : browserHelperDetected ? '需更新' : '待安装'}
+            </span>
           </div>
           <div className="browser-auth-actions">
             <button className="button primary" type="button" disabled={createMutation.isPending || browserHelperImporting} onClick={quickImport}>
               {createMutation.isPending || browserHelperImporting ? <LoaderCircle className="spin" aria-hidden="true" size={18} /> : <Globe aria-hidden="true" size={18} />}
-              {createMutation.isPending ? '正在准备' : browserHelperImporting ? '正在读取' : browserHelperReady ? '一键读取当前地址' : '启用一键读取'}
+              {createMutation.isPending
+                ? '正在准备'
+                : browserHelperImporting
+                  ? '正在读取'
+                  : browserHelperReady
+                    ? '一键读取当前地址'
+                    : browserHelperDetected ? '更新浏览器助手' : '启用一键读取'}
             </button>
-            <a className="button secondary" href={browserHelperDownloadURL} download><Download aria-hidden="true" size={18} />下载浏览器助手</a>
+            <a className="button secondary" href={browserHelperDownloadURL} download><Download aria-hidden="true" size={18} />{browserHelperDetected && !browserHelperReady ? '更新浏览器助手' : '下载浏览器助手'}</a>
             {attempt?.status === 'waiting' ? <button className="button ghost" type="button" onClick={openLoginWindow}><ExternalLink aria-hidden="true" size={18} />打开渠道站点</button> : null}
           </div>
           {showBrowserHelperInstall ? (
             <ol className="browser-helper-steps">
               <li>下载并解压浏览器助手。</li>
               <li>在 Chrome 或 Edge 扩展页面开启开发者模式，选择“加载已解压的扩展程序”。</li>
-              <li>刷新当前页面，再点击“一键读取当前地址”。</li>
+              <li>{browserHelperDetected ? '在扩展页面重新加载新版助手，再刷新当前页面。' : '刷新当前页面，再点击“一键读取当前地址”。'}</li>
             </ol>
           ) : null}
           {browserHelperMessage ? <InlineMessage tone={browserHelperMessage.includes('已读取') ? 'success' : 'info'}>{browserHelperMessage}</InlineMessage> : null}
         </div>
+      ) : androidRequiresHTTPS ? (
+        <InlineMessage tone="danger">{androidHTTPSMessage}</InlineMessage>
       ) : (
         <div className="browser-auth-actions">
           <button className="button secondary" type="button" disabled={createMutation.isPending || attempt?.status === 'waiting'} onClick={prepareLogin}>

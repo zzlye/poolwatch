@@ -80,14 +80,20 @@ describe('渠道向导', () => {
     expect(screen.getByText('支持 Linux.do、GitHub 等站点网页登录。')).toBeInTheDocument()
   })
 
-  it('Sub2API 网页登录先准备任务再由真实点击打开渠道页面', async () => {
-    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue({
+  it('Sub2API 浏览器助手会读取当前地址并接管令牌', async () => {
+    const waitingAttempt = {
       id: 'auth_0123456789abcdef0123456789abcdef',
-      status: 'waiting',
+      status: 'waiting' as const,
       loginUrl: 'https://api.example.com/login',
       expiresAt: new Date(Date.now() + 600_000).toISOString()
+    }
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt').mockResolvedValue(waitingAttempt)
+    const readAttempt = vi.spyOn(api, 'targetAuthAttempt').mockResolvedValue({
+      ...waitingAttempt,
+      status: 'ready',
+      message: 'Sub2API 网页登录成功。'
     })
-    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const postMessage = vi.spyOn(window, 'postMessage')
     renderWithClient(
       <MemoryRouter initialEntries={['/targets/new']}>
         <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
@@ -97,12 +103,126 @@ describe('渠道向导', () => {
     fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'sub2api' } })
     fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '下一步' }))
-    fireEvent.click(screen.getByRole('button', { name: '准备网页登录' }))
-    const launch = await screen.findByRole('button', { name: '打开授权窗口' })
-    expect(createAttempt).toHaveBeenCalledWith({ kind: 'sub2api', baseUrl: 'https://api.example.com' })
-    expect(open).not.toHaveBeenCalled()
-    fireEvent.click(launch)
-    expect(open).toHaveBeenCalledWith('https://api.example.com/login', '_blank', 'noopener,noreferrer')
+    await waitFor(() => expect(postMessage).toHaveBeenCalledWith(
+      { source: 'poolwatch-page', type: 'POOLWATCH_BROWSER_HELPER_PING' },
+      window.location.origin
+    ))
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_BROWSER_HELPER_READY',
+          version: '1.1.0',
+          capabilities: ['new_api', 'sub2api']
+        }
+      }))
+    })
+    fireEvent.click(await screen.findByRole('button', { name: '一键读取当前地址' }))
+    await waitFor(() => expect(createAttempt).toHaveBeenCalledWith({ kind: 'sub2api', baseUrl: 'https://api.example.com' }))
+    const importCall = await waitFor(() => {
+      const call = postMessage.mock.calls.find(([message]) => message?.type === 'POOLWATCH_IMPORT_SUB2_API')
+      expect(call).toBeDefined()
+      return call!
+    })
+    const importMessage = importCall[0]
+    expect(importMessage.attemptId).toBe(waitingAttempt.id)
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_IMPORT_RESULT',
+          requestId: importMessage.requestId,
+          attemptId: waitingAttempt.id,
+          ok: true,
+          message: '已读取 Sub2API 登录令牌。'
+        }
+      }))
+    })
+    expect(await screen.findByText('已读取 Sub2API 登录令牌。')).toBeInTheDocument()
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_BROWSER_HELPER_READY',
+          version: '1.1.0',
+          capabilities: ['new_api', 'sub2api']
+        }
+      }))
+    })
+    expect(screen.getByText('已读取 Sub2API 登录令牌。')).toBeInTheDocument()
+    await waitFor(() => expect(readAttempt).toHaveBeenCalledWith(waitingAttempt.id))
+    expect(await screen.findByText('Sub2API 网页登录成功。')).toBeInTheDocument()
+  })
+
+  it('Sub2API 遇到旧版浏览器助手时提示更新且不创建任务', async () => {
+    const createAttempt = vi.spyOn(api, 'createTargetAuthAttempt')
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '旧助手渠道' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'sub2api' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+      }))
+    })
+    expect(await screen.findByText('需更新')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '更新浏览器助手' }))
+    expect(screen.getByText('当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。')).toBeInTheDocument()
+    expect(createAttempt).not.toHaveBeenCalled()
+    expect(screen.getByRole('link', { name: '更新浏览器助手' })).toHaveAttribute('href', '/downloads/poolwatch-browser-helper-v1.1.0.zip')
+  })
+
+  it('浏览器助手缺少当前渠道能力时立即显示更新步骤', async () => {
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '能力检测渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', {
+        source: window,
+        origin: window.location.origin,
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_BROWSER_HELPER_READY',
+          version: '1.1.0',
+          capabilities: ['sub2api']
+        }
+      }))
+    })
+    expect(await screen.findByText('需更新')).toBeInTheDocument()
+    expect(screen.getByText('当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。')).toBeInTheDocument()
+    expect(screen.getByText('在扩展页面重新加载新版助手，再刷新当前页面。')).toBeInTheDocument()
+  })
+
+  it('安卓端会在 HTTP 渠道的网页登录区域提前提示 HTTPS 限制', async () => {
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 PoolWatchAndroid/1.1.4')
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: '安卓 HTTP 渠道' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'http://api.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    expect(screen.getByText('安卓端网页登录仅支持 HTTPS 渠道地址。请返回上一步填写 HTTPS 地址，或使用桌面端浏览器助手导入当前登录状态。')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /准备网页登录/ })).not.toBeInTheDocument()
   })
 
   it('New API 浏览器助手只读取第一步当前地址并接管授权结果', async () => {
@@ -338,6 +458,10 @@ describe('渠道向导', () => {
       'https://other.example.com/oauth/callback#access_token=secret',
       'https://sub.example.com'
     )).toThrow('与当前渠道不是同一来源')
+    expect(parseSub2APIOAuthCallback(
+      'https://sub.example.com/oauth/callback#refresh_token=refresh-only',
+      'https://sub.example.com'
+    )).toEqual({ accessToken: '', refreshToken: 'refresh-only' })
   })
 
   it('自动识别成功后切换渠道类型并显示结果', async () => {
@@ -722,7 +846,7 @@ describe('主题和实时事件', () => {
     expect(window.localStorage.getItem('pool-monitor-theme')).toBe('dark')
   })
 
-  it('收到快照或渠道更新事件后刷新对应缓存并在卸载时关闭连接', () => {
+  it('收到快照、渠道或设置更新事件后刷新对应缓存并在卸载时关闭连接', () => {
     const listeners = new Map<string, EventListener>()
     const close = vi.fn()
     class FakeEventSource {
@@ -740,6 +864,9 @@ describe('主题和实时事件', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['history'] })
     act(() => listeners.get('target.updated')?.(new Event('target.updated')))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['alerts'] })
+    act(() => listeners.get('settings.updated')?.(new Event('settings.updated')))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['settings'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['email'] })
     view.unmount()
     expect(close).toHaveBeenCalledOnce()
   })

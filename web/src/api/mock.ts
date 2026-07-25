@@ -4,6 +4,7 @@ import type {
   BootstrapState,
   DashboardData,
   DetectTargetResult,
+  EmailSettings,
   HistoryResult,
   PushInfo,
   SanitizedAccount,
@@ -176,6 +177,30 @@ let settings: Settings = {
   defaultCheckIntervalMinutes: 5,
   allowPrivateTargets: false,
   totpEnabled: false
+}
+
+function defaultEmailSettings(): EmailSettings {
+  return {
+    enabled: false,
+    provider: 'qq',
+    host: 'smtp.qq.com',
+    port: 465,
+    security: 'tls',
+    username: '',
+    fromName: '号池监控',
+    fromAddress: '',
+    recipients: [],
+    passwordConfigured: false
+  }
+}
+
+let emailSettings: EmailSettings = defaultEmailSettings()
+
+// 模拟环境同样只允许同一发信认证身份沿用已保存的授权码。
+function hasSameMockEmailIdentity(input: Record<string, unknown>): boolean {
+  return input.provider === emailSettings.provider && input.host === emailSettings.host &&
+    input.port === emailSettings.port && input.security === emailSettings.security &&
+    input.username === emailSettings.username
 }
 
 const targetAuthAttempts = new Map<string, TargetAuthAttempt>()
@@ -356,6 +381,21 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     settings = { ...settings, ...body }
     return settings as T
   }
+  if (cleanPath === '/api/email' && method === 'GET') return emailSettings as T
+  if (cleanPath === '/api/email' && method === 'PUT') {
+    if (emailSettings.passwordConfigured && !body.password && !hasSameMockEmailIdentity(body)) {
+      throw new Error('发件服务商、服务器或账号已变更，请重新填写授权码或应用密码')
+    }
+    const passwordConfigured = emailSettings.passwordConfigured || Boolean(body.password)
+    emailSettings = { ...emailSettings, ...body, passwordConfigured }
+    delete (emailSettings as EmailSettings & { password?: string }).password
+    return emailSettings as T
+  }
+  if (cleanPath === '/api/email' && method === 'DELETE') {
+    emailSettings = defaultEmailSettings()
+    return emailSettings as T
+  }
+  if (cleanPath === '/api/email/test' && method === 'POST') return { ok: true } as T
   if (cleanPath === '/api/push') return pushInfo as T
   if (cleanPath.startsWith('/api/push/')) return { ok: true } as T
   if (cleanPath === '/api/security/totp/start') {

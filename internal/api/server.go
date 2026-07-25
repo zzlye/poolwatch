@@ -16,6 +16,7 @@ import (
 
 	"poolwatch/internal/auth"
 	"poolwatch/internal/events"
+	"poolwatch/internal/mailnotify"
 	"poolwatch/internal/push"
 	"poolwatch/internal/scheduler"
 	"poolwatch/internal/secure"
@@ -23,6 +24,14 @@ import (
 )
 
 const sessionCookieName = "poolwatch_session"
+
+// EmailService 定义邮箱设置接口，便于 HTTP 层隔离 SMTP 实现并注入测试替身。
+type EmailService interface {
+	Settings(context.Context) (mailnotify.PublicConfig, error)
+	Save(context.Context, mailnotify.Config) (mailnotify.PublicConfig, error)
+	Clear(context.Context) (mailnotify.PublicConfig, error)
+	Test(context.Context, mailnotify.Config) error
+}
 
 type contextKey string
 
@@ -38,6 +47,7 @@ type Dependencies struct {
 	Auth                *auth.Service
 	Scheduler           *scheduler.Service
 	Push                *push.Service
+	Email               EmailService
 	Events              *events.Hub
 	AndroidUpdates      AndroidUpdateProvider
 	Static              http.Handler
@@ -115,6 +125,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/push/subscriptions", s.protected(http.HandlerFunc(s.handlePushSubscribe)))
 	mux.Handle("DELETE /api/push/subscriptions/{id}", s.protected(http.HandlerFunc(s.handlePushDelete)))
 	mux.Handle("POST /api/push/test", s.protected(http.HandlerFunc(s.handlePushTest)))
+	mux.Handle("GET /api/email", s.protected(http.HandlerFunc(s.handleEmailSettings)))
+	mux.Handle("PUT /api/email", s.protected(http.HandlerFunc(s.handleUpdateEmailSettings)))
+	mux.Handle("DELETE /api/email", s.protected(http.HandlerFunc(s.handleDeleteEmailSettings)))
+	mux.Handle("POST /api/email/test", s.protected(http.HandlerFunc(s.handleEmailTest)))
 
 	mux.Handle("GET /api/settings", s.protected(http.HandlerFunc(s.handleSettings)))
 	mux.Handle("PUT /api/settings", s.protected(http.HandlerFunc(s.handleUpdateSettings)))

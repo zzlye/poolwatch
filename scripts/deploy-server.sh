@@ -99,8 +99,20 @@ try:
     missing = sorted(required - columns)
     if missing:
         raise SystemExit("数据库迁移缺少字段：" + ", ".join(missing))
+    tables = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    )}
+    required_tables = {"alert_notification_deliveries"}
+    missing_tables = sorted(required_tables - tables)
+    if missing_tables:
+        raise SystemExit("数据库迁移缺少数据表：" + ", ".join(missing_tables))
+    delivery_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(alert_notification_deliveries)")
+    }
+    if "destination_id" not in delivery_columns:
+        raise SystemExit("通知投递状态尚未升级为按设备记录")
     counts = {}
-    for table in ("admins", "targets", "alerts", "push_subscriptions"):
+    for table in ("admins", "targets", "alerts", "push_subscriptions", "alert_notification_deliveries"):
         counts[table] = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print("数据计数：" + ", ".join(f"{key}={value}" for key, value in counts.items()))
 finally:

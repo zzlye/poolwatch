@@ -2161,6 +2161,50 @@ tbody tr:hover {
   margin-bottom: 16px;
 }
 
+.email-free-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 11px 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  background: var(--primary-soft);
+  border-radius: 7px;
+}
+
+.email-free-note strong {
+  flex: 0 0 auto;
+  color: var(--primary-text);
+}
+
+.email-settings-state {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--text-secondary);
+}
+
+.email-settings-state.error {
+  justify-content: space-between;
+  padding: 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 7px;
+}
+
+.email-settings-form {
+  margin-top: 4px;
+}
+
+.email-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .device-list {
   display: flex;
   flex-direction: column;
@@ -3005,6 +3049,22 @@ tbody tr:hover {
 
   .push-actions .field {
     grid-column: auto;
+  }
+
+  .email-free-note,
+  .email-settings-state.error,
+  .email-settings-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .email-free-note {
+    gap: 3px;
+  }
+
+  .email-settings-actions .button,
+  .email-settings-state.error .button {
+    width: 100%;
   }
 
   .security-status {

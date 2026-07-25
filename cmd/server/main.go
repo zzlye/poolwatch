@@ -15,7 +15,9 @@ import (
 	"poolwatch/internal/auth"
 	"poolwatch/internal/config"
 	"poolwatch/internal/events"
+	"poolwatch/internal/mailnotify"
 	"poolwatch/internal/monitor"
+	"poolwatch/internal/notifications"
 	"poolwatch/internal/push"
 	"poolwatch/internal/scheduler"
 	"poolwatch/internal/secure"
@@ -58,15 +60,10 @@ func run(logger *slog.Logger) error {
 	if err := pushService.EnsureKeys(context.Background()); err != nil {
 		return err
 	}
-	notifier := alerts.NotifierFunc(func(_ context.Context, notification alerts.Notification) error {
-		eventHub.Publish("alert", notification)
-		pushContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return pushService.Send(pushContext, push.Notification{
-			Title: notification.Title, Body: notification.Message,
-			URL: "/alerts?focus=" + notification.AlertID, Tag: notification.AlertID, Severity: notification.Severity,
-		})
-	})
+	emailService := mailnotify.NewService(
+		database, vault, configuration.PublicBaseURL, configuration.AllowPrivateTargets,
+	)
+	notifier := notifications.NewDispatcher(database, pushService, emailService, eventHub, logger)
 	alertEngine := alerts.NewEngine(database, notifier)
 	registry := monitor.NewRegistry(monitor.HTTPOptions{Timeout: 20 * time.Second, MaxResponseBytes: 1 << 20})
 	schedulerService := scheduler.NewService(database, vault, registry, alertEngine, configuration.AllowPrivateTargets)
@@ -82,7 +79,8 @@ func run(logger *slog.Logger) error {
 	}
 	apiServer := api.NewServer(api.Dependencies{
 		Store: database, Vault: vault, Auth: authService, Scheduler: schedulerService,
-		Push: pushService, Events: eventHub, AndroidUpdates: api.NewGitHubReleaseUpdateProvider(), Static: staticHandler,
+		Push: pushService, Email: emailService, Events: eventHub,
+		AndroidUpdates: api.NewGitHubReleaseUpdateProvider(), Static: staticHandler,
 		PublicBaseURL: configuration.PublicBaseURL, AllowPrivateTargets: configuration.AllowPrivateTargets, Logger: logger,
 	})
 	httpServer := &http.Server{

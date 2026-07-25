@@ -129,6 +129,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_alerts_state_time ON alerts(state, opened_at DESC)`,
 		`DROP INDEX IF EXISTS idx_alerts_open_incident`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_open_incident ON alerts(target_id, type, metric_key) WHERE state IN ('open', 'acknowledged')`,
+		`CREATE TABLE IF NOT EXISTS alert_notification_deliveries (
+			alert_id TEXT NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+			channel TEXT NOT NULL,
+			destination_id TEXT NOT NULL DEFAULT '',
+			delivered_at TEXT,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			last_attempt_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(alert_id, channel, destination_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS push_subscriptions (
 			id TEXT PRIMARY KEY,
 			endpoint TEXT NOT NULL UNIQUE,
@@ -171,6 +181,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("执行数据库迁移失败: %w", err)
 		}
 	}
+	if err := s.ensureNotificationDeliveryDestination(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "push_subscriptions", "user_agent", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -188,6 +201,93 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := s.ensureColumn(ctx, "chat_accounts", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureNotificationDeliveryDestination 将早期按通道记录的投递状态升级为按具体接收方记录。
+func (s *Store) ensureNotificationDeliveryDestination(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(alert_notification_deliveries)`)
+	if err != nil {
+		return err
+	}
+	destinationFound := false
+	primaryColumns := map[string]int{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, fieldType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "destination_id" {
+			destinationFound = true
+		}
+		if primaryKey > 0 {
+			primaryColumns[name] = primaryKey
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if destinationFound && primaryColumns["alert_id"] == 1 && primaryColumns["channel"] == 2 && primaryColumns["destination_id"] == 3 {
+		return nil
+	}
+
+	transaction, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, `DROP TABLE IF EXISTS alert_notification_deliveries_upgrade`); err != nil {
+		return fmt.Errorf("清理通知投递升级临时表失败: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `CREATE TABLE alert_notification_deliveries_upgrade (
+		alert_id TEXT NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+		channel TEXT NOT NULL,
+		destination_id TEXT NOT NULL DEFAULT '',
+		delivered_at TEXT,
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		last_attempt_at TEXT,
+		last_error TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY(alert_id, channel, destination_id)
+	)`); err != nil {
+		return fmt.Errorf("创建通知投递升级表失败: %w", err)
+	}
+	if destinationFound {
+		if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO alert_notification_deliveries_upgrade(
+			alert_id, channel, destination_id, delivered_at, attempt_count, last_attempt_at, last_error
+		) SELECT alert_id, channel, destination_id, delivered_at, attempt_count, last_attempt_at, last_error
+		FROM alert_notification_deliveries`); err != nil {
+			return fmt.Errorf("迁移通知投递状态失败: %w", err)
+		}
+	} else {
+		if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO alert_notification_deliveries_upgrade(
+			alert_id, channel, destination_id, delivered_at, attempt_count, last_attempt_at, last_error
+		) SELECT alert_id, channel, '', delivered_at, attempt_count, last_attempt_at, last_error
+		FROM alert_notification_deliveries WHERE channel <> 'web_push'`); err != nil {
+			return fmt.Errorf("迁移通知通道投递状态失败: %w", err)
+		}
+		// 旧版只有整批推送状态；整批成功时可安全展开到当时保存的全部设备，避免邮箱重试造成重复推送。
+		if _, err := transaction.ExecContext(ctx, `INSERT OR IGNORE INTO alert_notification_deliveries_upgrade(
+			alert_id, channel, destination_id, delivered_at, attempt_count, last_attempt_at, last_error
+		) SELECT deliveries.alert_id, deliveries.channel, subscriptions.id, deliveries.delivered_at,
+			deliveries.attempt_count, deliveries.last_attempt_at, deliveries.last_error
+		FROM alert_notification_deliveries AS deliveries
+		CROSS JOIN push_subscriptions AS subscriptions
+		WHERE deliveries.channel = 'web_push'`); err != nil {
+			return fmt.Errorf("迁移浏览器设备投递状态失败: %w", err)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `DROP TABLE alert_notification_deliveries`); err != nil {
+		return fmt.Errorf("替换通知投递旧表失败: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `ALTER TABLE alert_notification_deliveries_upgrade RENAME TO alert_notification_deliveries`); err != nil {
+		return fmt.Errorf("启用通知投递新表失败: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("提交通知投递升级失败: %w", err)
 	}
 	return nil
 }

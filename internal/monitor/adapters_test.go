@@ -194,6 +194,42 @@ func TestSub2API网页登录令牌会读取当前用户(t *testing.T) {
 	}
 }
 
+func TestSub2API网页登录可使用单独刷新令牌(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/refresh", func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if body["refresh_token"] != "oauth-refresh-only" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{
+			"access_token": "oauth-renewed", "refresh_token": "oauth-rotated", "expires_in": 3600,
+		}})
+	})
+	mux.HandleFunc("/api/v1/auth/me", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer oauth-renewed" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"balance": "9.5", "status": "active"}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newSub2APIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	credential, err := adapter.VerifyBrowserCredential(context.Background(), TargetConfig{
+		BaseURL: server.URL, AllowPrivateNetwork: true,
+		Credential: Credential{RefreshToken: "oauth-refresh-only"},
+	})
+	if err != nil {
+		t.Fatalf("仅使用刷新令牌校验 Sub2API 网页登录失败：%v", err)
+	}
+	if credential.AccessToken != "oauth-renewed" || credential.RefreshToken != "oauth-rotated" {
+		t.Fatalf("Sub2API 刷新后的凭据不正确：%#v", credential)
+	}
+}
+
 func TestNewAPI缓存会话失效后重新登录(t *testing.T) {
 	var loginRequests atomic.Int32
 	var selfRequests atomic.Int32

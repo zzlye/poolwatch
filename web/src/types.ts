@@ -20,6 +20,10 @@ export type ThemePreference = 'system' | 'light' | 'dark'
 
 export type CredentialMode = 'password' | 'access_token' | 'browser_session' | 'browser_oauth'
 
+export type EmailProvider = 'qq' | '163' | 'gmail' | 'outlook' | 'custom'
+
+export type EmailSecurity = 'tls' | 'starttls'
+
 export type ThresholdComparison = 'lte' | 'gte'
 
 export interface MetricValue {
@@ -190,6 +194,32 @@ export interface Settings {
   defaultCheckIntervalMinutes: number
   allowPrivateTargets: boolean
   totpEnabled: boolean
+}
+
+export interface EmailSettings {
+  enabled: boolean
+  provider: EmailProvider
+  host: string
+  port: number
+  security: EmailSecurity
+  username: string
+  fromName: string
+  fromAddress: string
+  recipients: string[]
+  passwordConfigured: boolean
+}
+
+export interface EmailSettingsInput {
+  enabled: boolean
+  provider: EmailProvider
+  host: string
+  port: number
+  security: EmailSecurity
+  username: string
+  password?: string
+  fromName: string
+  fromAddress: string
+  recipients: string[]
 }
 
 export interface TotpSetup {
