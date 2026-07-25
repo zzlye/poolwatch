@@ -35,7 +35,10 @@ interface EmailFormState extends Omit<EmailSettings, 'recipients'> {
 }
 
 function toEmailForm(settings: EmailSettings): EmailFormState {
-  return { ...settings, password: '', recipientsText: settings.recipients.join('\n') }
+  const { recipients, ...rest } = settings
+  // 同时兼容旧版本接口和浏览器缓存中的空值，避免整个设置页因格式异常而中断渲染。
+  const safeRecipients = Array.isArray(recipients) ? recipients : []
+  return { ...rest, password: '', recipientsText: safeRecipients.join('\n') }
 }
 
 function parseEmailRecipients(value: string): string[] {

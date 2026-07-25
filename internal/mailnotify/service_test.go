@@ -2,6 +2,7 @@ package mailnotify
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/smtp"
@@ -122,6 +123,24 @@ func TestEmailConfigCanBeClearedToQQDefault(t *testing.T) {
 	loaded, err := service.Settings(ctx)
 	if err != nil || !reflect.DeepEqual(loaded, cleared) {
 		t.Fatalf("清除后重新读取的默认状态不一致: %#v, %#v, %v", loaded, cleared, err)
+	}
+}
+
+func TestEmailDefaultSettingsSerializeRecipientsAsArray(t *testing.T) {
+	database, vault := emailFixture(t)
+	defer database.Close()
+	service := NewService(database, vault, "", false)
+
+	settings, err := service.Settings(context.Background())
+	if err != nil {
+		t.Fatalf("读取默认邮箱配置失败: %v", err)
+	}
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("序列化默认邮箱配置失败: %v", err)
+	}
+	if strings.Contains(string(payload), `"recipients":null`) || !strings.Contains(string(payload), `"recipients":[]`) {
+		t.Fatalf("默认收件人列表应序列化为空数组: %s", payload)
 	}
 }
 

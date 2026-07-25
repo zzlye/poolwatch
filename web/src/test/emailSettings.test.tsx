@@ -44,6 +44,21 @@ describe('邮件提醒设置', () => {
 
   afterEach(() => vi.restoreAllMocks())
 
+  it('默认配置返回空收件人时设置页不会白屏', async () => {
+    vi.spyOn(api, 'emailSettings').mockResolvedValue({
+      ...configuredEmail,
+      enabled: false,
+      username: '',
+      fromAddress: '',
+      recipients: null as unknown as string[],
+      passwordConfigured: false
+    })
+    renderSettingsPage()
+
+    expect(await screen.findByRole('heading', { name: '邮件提醒' })).toBeInTheDocument()
+    expect(await screen.findByLabelText(/收件邮箱/)).toHaveValue('')
+  })
+
   it('提供常用邮箱预设并允许切换到自定义服务器', async () => {
     const readEmail = vi.spyOn(api, 'emailSettings').mockResolvedValue(configuredEmail)
     renderSettingsPage()

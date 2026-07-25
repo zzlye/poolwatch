@@ -266,7 +266,7 @@ func publicConfig(config Config) PublicConfig {
 	return PublicConfig{
 		Enabled: config.Enabled, Provider: config.Provider, Host: config.Host, Port: config.Port,
 		Security: config.Security, Username: config.Username, FromName: config.FromName,
-		FromAddress: config.FromAddress, Recipients: append([]string(nil), config.Recipients...),
+		FromAddress: config.FromAddress, Recipients: append([]string{}, config.Recipients...),
 		PasswordConfigured: strings.TrimSpace(config.Password) != "",
 	}
 }
