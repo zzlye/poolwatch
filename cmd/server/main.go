@@ -73,6 +73,9 @@ func run(logger *slog.Logger) error {
 	schedulerService.SetSnapshotHandler(func(targetID string) {
 		eventHub.Publish("snapshot", map[string]string{"targetId": targetID})
 	})
+	schedulerService.SetMultiplierHandler(func(targetID string) {
+		eventHub.Publish("multiplier.updated", map[string]string{"targetId": targetID})
+	})
 	staticHandler, err := webui.NewHandler()
 	if err != nil {
 		return err

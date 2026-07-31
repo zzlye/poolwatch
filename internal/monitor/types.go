@@ -82,6 +82,7 @@ const (
 	AlertTypeCredentialInvalid AlertType = "credential"
 	AlertTypeConnectivity      AlertType = "unreachable"
 	AlertTypeRecovered         AlertType = "recovered"
+	AlertTypeMultiplierChanged AlertType = "multiplier_changed"
 )
 
 // AuthMode 表示自定义 HTTP 渠道的认证方式。
@@ -218,6 +219,20 @@ type Snapshot struct {
 	CredentialUpdate *Credential     `json:"-"`
 }
 
+// GroupMultiplier 是渠道向当前登录用户公开的单个分组及其实际计费倍率。
+type GroupMultiplier struct {
+	Key         string          `json:"key"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Multiplier  decimal.Decimal `json:"multiplier"`
+}
+
+// GroupMultiplierResult 保存倍率读取结果以及适配器轮换后的凭据。
+type GroupMultiplierResult struct {
+	Groups           []GroupMultiplier `json:"groups"`
+	CredentialUpdate *Credential       `json:"-"`
+}
+
 // Adapter 定义所有渠道适配器统一的只读检测接口。
 type Adapter interface {
 	Kind() TargetKind
@@ -248,6 +263,11 @@ type Prober interface {
 // BrowserCredentialVerifier 校验浏览器授权流程捕获的渠道凭据，并返回可持久化的规范化凭据。
 type BrowserCredentialVerifier interface {
 	VerifyBrowserCredential(ctx context.Context, target TargetInput) (Credential, error)
+}
+
+// GroupMultiplierReader 读取当前登录用户实际可用的分组倍率。
+type GroupMultiplierReader interface {
+	ReadGroupMultipliers(ctx context.Context, target TargetInput) (GroupMultiplierResult, error)
 }
 
 // Detector 根据只读公开端点识别渠道类型。

@@ -14,7 +14,9 @@ export type TargetStatus = 'healthy' | 'warning' | 'error' | 'disabled' | 'unkno
 
 export type AccountQuotaState = 'available' | 'unavailable' | 'unsupported'
 
-export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered'
+export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered' | 'multiplier_changed'
+
+export type MultiplierStatus = 'stable' | 'changed' | 'missing' | 'unknown'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 
@@ -151,6 +153,29 @@ export interface Alert {
   status: 'open' | 'acknowledged' | 'resolved'
   createdAt: string
   resolvedAt?: string
+}
+
+export interface GroupMultiplier {
+  key: string
+  name: string
+  description?: string
+  multiplier: string
+  previousMultiplier?: string
+  monitored: boolean
+  status: MultiplierStatus
+  lastCheckedAt?: string
+  changedAt?: string
+  lastError?: string
+}
+
+export interface TargetMultiplierState {
+  targetId: string
+  targetName: string
+  targetKind: 'new_api' | 'sub2api'
+  enabled: boolean
+  groups: GroupMultiplier[]
+  lastCheckedAt?: string
+  lastError?: string
 }
 
 export interface DashboardData {

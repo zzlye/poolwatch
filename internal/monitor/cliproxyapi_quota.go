@@ -503,12 +503,11 @@ func cliProxyAPICodexLimitWindows(
 }
 
 func cliProxyAPICodexWindowDescriptor(window map[string]any, fallbackSuffix, fallbackLabel string) (string, string) {
-	seconds, ok := decimalFromAny(firstNonNil(window["limit_window_seconds"], window["limitWindowSeconds"]))
-	if !ok || !seconds.IsPositive() {
+	wholeSeconds, err := parseInt64(firstNonNil(window["limit_window_seconds"], window["limitWindowSeconds"]))
+	if err != nil || wholeSeconds <= 0 {
 		return fallbackSuffix, fallbackLabel
 	}
-	wholeSeconds := seconds.IntPart()
-	if wholeSeconds <= 0 || wholeSeconds > 366*24*60*60 {
+	if wholeSeconds > 366*24*60*60 {
 		return fallbackSuffix, fallbackLabel
 	}
 	switch {
@@ -782,11 +781,11 @@ func cliProxyAPIResetAt(value map[string]any, now time.Time) string {
 	if parsed := parseCLIProxyAPITime(firstNonNil(value["reset_at"], value["resetAt"], value["next_recover_at"], value["nextRecoverAt"])); parsed != "" {
 		return parsed
 	}
-	seconds, ok := decimalFromAny(firstNonNil(value["reset_after_seconds"], value["resetAfterSeconds"]))
-	if !ok || !seconds.IsPositive() {
+	seconds, err := parseInt64(firstNonNil(value["reset_after_seconds"], value["resetAfterSeconds"]))
+	if err != nil || seconds <= 0 || seconds > 366*24*60*60 {
 		return ""
 	}
-	return now.Add(time.Duration(seconds.IntPart()) * time.Second).UTC().Format(time.RFC3339Nano)
+	return now.Add(time.Duration(seconds) * time.Second).UTC().Format(time.RFC3339Nano)
 }
 
 func parseCLIProxyAPITime(value any) string {

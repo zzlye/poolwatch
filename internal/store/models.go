@@ -52,7 +52,7 @@ type Snapshot struct {
 	DetailJSON  string    `json:"detail_json,omitempty"`
 }
 
-// Alert 表示额度、凭据或可用性事件。
+// Alert 表示额度、凭据、可用性或倍率变化事件。
 type Alert struct {
 	ID             string     `json:"id"`
 	TargetID       string     `json:"target_id"`
@@ -113,4 +113,36 @@ type ChatAccount struct {
 type AlertWithTarget struct {
 	Alert
 	TargetName string `json:"target_name"`
+}
+
+// GroupMultiplierMonitor 保存用户选择监控的分组倍率及最近一次变化。
+type GroupMultiplierMonitor struct {
+	TargetID           string    `json:"target_id"`
+	GroupKey           string    `json:"group_key"`
+	GroupName          string    `json:"group_name"`
+	Description        string    `json:"description,omitempty"`
+	CurrentMultiplier  string    `json:"current_multiplier"`
+	PreviousMultiplier string    `json:"previous_multiplier,omitempty"`
+	Missing            bool      `json:"missing"`
+	LastError          string    `json:"last_error,omitempty"`
+	LastCheckedAt      time.Time `json:"last_checked_at,omitempty"`
+	LastChangedAt      time.Time `json:"last_changed_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// GroupMultiplierObservation 是一次上游检测得到的规范化倍率。
+type GroupMultiplierObservation struct {
+	GroupKey    string
+	GroupName   string
+	Description string
+	Multiplier  string
+}
+
+// GroupMultiplierChange 描述需要产生通知的一次倍率变化。
+type GroupMultiplierChange struct {
+	GroupKey           string
+	GroupName          string
+	PreviousMultiplier string
+	CurrentMultiplier  string
 }

@@ -32,6 +32,10 @@ export function useRealtime(enabled: boolean): void {
     source.addEventListener('snapshot', refreshTargets)
     source.addEventListener('target.updated', refreshTargetConfiguration)
     source.addEventListener('alert', refreshAlerts)
+    source.addEventListener('multiplier.updated', () => {
+      void queryClient.invalidateQueries({ queryKey: ['group-multipliers'] })
+      refreshAlerts()
+    })
     source.addEventListener('settings.updated', refreshSettings)
 
     return () => source.close()

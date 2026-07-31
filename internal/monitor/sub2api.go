@@ -3,16 +3,22 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type sub2APIAdapter struct {
 	http   *secureHTTPClient
 	mu     sync.Mutex
 	tokens map[string]sub2APIToken
+	now    func() time.Time
 }
 
 type sub2APIToken struct {
@@ -22,7 +28,7 @@ type sub2APIToken struct {
 }
 
 func newSub2APIAdapter(client *secureHTTPClient) *sub2APIAdapter {
-	return &sub2APIAdapter{http: client, tokens: make(map[string]sub2APIToken)}
+	return &sub2APIAdapter{http: client, tokens: make(map[string]sub2APIToken), now: time.Now}
 }
 
 func (adapter *sub2APIAdapter) Kind() TargetKind {
@@ -69,6 +75,260 @@ func (adapter *sub2APIAdapter) Check(ctx context.Context, target TargetConfig) (
 		snapshot.Message = "Sub2API 账号状态异常"
 	}
 	return snapshot, nil
+}
+
+// ReadGroupMultipliers 合并 Sub2API 分组默认倍率与当前用户专属倍率。
+func (adapter *sub2APIAdapter) ReadGroupMultipliers(ctx context.Context, target TargetConfig) (GroupMultiplierResult, error) {
+	target = ensureTargetKind(target, adapter.Kind())
+	session := adapter.http.newSession(target.AllowPrivateNetwork)
+	token, err := adapter.resolveToken(ctx, session, target)
+	if err != nil {
+		return GroupMultiplierResult{}, err
+	}
+	result := GroupMultiplierResult{CredentialUpdate: sub2APIUpdatedCredential(target.Credential, token)}
+	groups, err := adapter.readGroupMultipliers(ctx, session, target, token.accessToken)
+	if err != nil && IsAuthFailure(err) && (token.refreshToken != "" || sub2APIUsesPassword(target.Credential)) {
+		token, err = adapter.renewToken(ctx, session, target, token.refreshToken)
+		if err == nil {
+			result.CredentialUpdate = sub2APIUpdatedCredential(target.Credential, token)
+			groups, err = adapter.readGroupMultipliers(ctx, session, target, token.accessToken)
+		}
+	}
+	if err != nil {
+		return result, err
+	}
+	result.Groups = groups
+	return result, nil
+}
+
+func sub2APIUpdatedCredential(current Credential, token sub2APIToken) *Credential {
+	current.AccessToken = token.accessToken
+	if token.refreshToken != "" {
+		current.RefreshToken = token.refreshToken
+	}
+	current.TOTPCode = ""
+	return &current
+}
+
+func (adapter *sub2APIAdapter) readGroupMultipliers(ctx context.Context, session *requestSession, target TargetConfig, accessToken string) ([]GroupMultiplier, error) {
+	headers := make(http.Header)
+	setBearer(headers, accessToken)
+	availableURL, err := joinTargetURL(target.BaseURL, "/api/v1/groups/available")
+	if err != nil {
+		return nil, err
+	}
+	var availablePayload any
+	if err := session.doJSON(ctx, http.MethodGet, availableURL, headers, nil, &availablePayload); err != nil {
+		return nil, err
+	}
+	availableData, err := sub2APIEnvelopeValue(availablePayload, true)
+	if err != nil {
+		return nil, err
+	}
+	items, ok := availableData.([]any)
+	if !ok {
+		if object, objectOK := availableData.(map[string]any); objectOK {
+			items, ok = object["groups"].([]any)
+		}
+	}
+	if !ok {
+		return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 可用分组格式无效", 0, nil)
+	}
+
+	var serverLocation *time.Location
+	if sub2APIHasPeakRate(items) {
+		serverLocation, err = adapter.readServerLocation(ctx, session, target)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	overrides := make(map[string]any)
+	ratesURL, err := joinTargetURL(target.BaseURL, "/api/v1/groups/rates")
+	if err != nil {
+		return nil, err
+	}
+	var ratesPayload any
+	if err := session.doJSON(ctx, http.MethodGet, ratesURL, headers, nil, &ratesPayload); err != nil {
+		// 兼容尚未提供用户专属倍率端点的旧版 Sub2API。
+		if statusCodeOf(err) != http.StatusNotFound {
+			return nil, err
+		}
+	} else {
+		ratesData, parseErr := sub2APIEnvelopeValue(ratesPayload, true)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if ratesData == nil {
+			// 未配置任何用户专属倍率时部分版本会返回 data: null。
+			overrides = make(map[string]any)
+		} else if typed, typedOK := ratesData.(map[string]any); typedOK {
+			overrides = typed
+			if nested, nestedOK := typed["rates"].(map[string]any); nestedOK {
+				overrides = nested
+			}
+		} else {
+			return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 专属倍率格式无效", 0, nil)
+		}
+	}
+
+	groups := make([]GroupMultiplier, 0, len(items))
+	for _, raw := range items {
+		item, itemOK := raw.(map[string]any)
+		if !itemOK {
+			return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 分组条目格式无效", 0, nil)
+		}
+		key, idErr := sub2APIGroupKey(item)
+		if idErr != nil {
+			return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 分组标识无效", 0, idErr)
+		}
+		ratioValue, exists := firstValue(item, "rate_multiplier", "multiplier")
+		if !exists {
+			return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 分组默认倍率无效", 0, nil)
+		}
+		ratio, ratioErr := parseGroupMultiplierDecimal(ratioValue)
+		if ratioErr != nil || !ratio.IsPositive() {
+			return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 分组默认倍率无效", 0, ratioErr)
+		}
+		if override, exists := overrides[key]; exists {
+			parsed, parseErr := parseGroupMultiplierDecimal(override)
+			if parseErr != nil || !parsed.IsPositive() {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 用户专属倍率无效", 0, parseErr)
+			}
+			ratio = parsed
+		}
+		if serverLocation != nil {
+			peak, peakErr := sub2APIPeakMultiplier(item, adapter.now().In(serverLocation))
+			if peakErr != nil {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 高峰倍率无效", 0, peakErr)
+			}
+			ratio = ratio.Mul(peak)
+			if _, rangeErr := parseGroupMultiplierDecimal(ratio); rangeErr != nil {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 实际倍率超出安全范围", 0, rangeErr)
+			}
+		}
+		name := strings.TrimSpace(stringField(item, "name"))
+		if name == "" {
+			name = "分组 " + key
+		}
+		groups = append(groups, GroupMultiplier{
+			Key: key, Name: name, Description: strings.TrimSpace(stringField(item, "description")), Multiplier: ratio,
+		})
+	}
+	if len(groups) == 0 {
+		return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "没有读取到可监控的分组倍率", 0, nil)
+	}
+	sort.Slice(groups, func(left, right int) bool {
+		if groups[left].Name == groups[right].Name {
+			return groups[left].Key < groups[right].Key
+		}
+		return groups[left].Name < groups[right].Name
+	})
+	return groups, nil
+}
+
+func sub2APIHasPeakRate(items []any) bool {
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		enabled, _ := boolField(item, "peak_rate_enabled")
+		if enabled && strings.EqualFold(strings.TrimSpace(stringField(item, "subscription_type")), "subscription") {
+			return true
+		}
+	}
+	return false
+}
+
+func (adapter *sub2APIAdapter) readServerLocation(ctx context.Context, session *requestSession, target TargetConfig) (*time.Location, error) {
+	endpoint, err := joinTargetURL(target.BaseURL, "/api/v1/settings/public")
+	if err != nil {
+		return nil, err
+	}
+	var payload any
+	if err := session.doJSON(ctx, http.MethodGet, endpoint, nil, nil, &payload); err != nil {
+		return nil, err
+	}
+	settings, err := sub2APIEnvelopeObject(payload, false)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(stringField(settings, "server_timezone"))
+	offset := strings.TrimSpace(stringField(settings, "server_utc_offset"))
+	seconds, err := sub2APIUTCOffsetSeconds(offset)
+	if err != nil {
+		return nil, checkError(ErrorClassResponse, "解析 Sub2API 服务器时区", "Sub2API 未返回有效的服务器时区", 0, err)
+	}
+	if name == "" {
+		name = offset
+	}
+	// 只判断本次检测时刻是否处于高峰，使用服务端公开的当前偏移可避免依赖本机时区数据。
+	return time.FixedZone(name, seconds), nil
+}
+
+func sub2APIUTCOffsetSeconds(value string) (int, error) {
+	if len(value) != 6 || (value[0] != '+' && value[0] != '-') || value[3] != ':' {
+		return 0, errors.New("服务器 UTC 偏移格式无效")
+	}
+	hour, hourErr := strconv.Atoi(value[1:3])
+	minute, minuteErr := strconv.Atoi(value[4:6])
+	if hourErr != nil || minuteErr != nil || hour > 23 || minute > 59 {
+		return 0, errors.New("服务器 UTC 偏移格式无效")
+	}
+	seconds := hour*60*60 + minute*60
+	if value[0] == '-' {
+		seconds = -seconds
+	}
+	return seconds, nil
+}
+
+func sub2APIGroupKey(item map[string]any) (string, error) {
+	raw, exists := firstValue(item, "id", "group_id")
+	if !exists {
+		return "", errors.New("缺少分组标识")
+	}
+	return parsePositiveInt64String(raw)
+}
+
+func sub2APIPeakMultiplier(item map[string]any, now time.Time) (decimal.Decimal, error) {
+	enabled, _ := boolField(item, "peak_rate_enabled")
+	if !enabled || !strings.EqualFold(strings.TrimSpace(stringField(item, "subscription_type")), "subscription") {
+		return decimal.NewFromInt(1), nil
+	}
+	start, startOK := sub2APIParseMinutes(stringField(item, "peak_start"))
+	end, endOK := sub2APIParseMinutes(stringField(item, "peak_end"))
+	if !startOK || !endOK || start >= end {
+		// 与 Sub2API 官方计费行为一致：高峰窗口无效时安全降级为一倍。
+		return decimal.NewFromInt(1), nil
+	}
+	current := now.Hour()*60 + now.Minute()
+	if current < start || current >= end {
+		return decimal.NewFromInt(1), nil
+	}
+	raw, exists := firstValue(item, "peak_rate_multiplier")
+	if !exists {
+		return decimal.Zero, errors.New("缺少高峰倍率")
+	}
+	peak, err := parseGroupMultiplierDecimal(raw)
+	if err != nil || peak.IsNegative() {
+		return decimal.Zero, errors.New("高峰倍率无效")
+	}
+	return peak, nil
+}
+
+func sub2APIParseMinutes(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	colon := strings.IndexByte(value, ':')
+	if (colon != 1 && colon != 2) || len(value)-colon-1 != 2 {
+		return 0, false
+	}
+	hour, hourErr := strconv.Atoi(value[:colon])
+	minute, minuteErr := strconv.Atoi(value[colon+1:])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return hour*60 + minute, true
 }
 
 // VerifyBrowserCredential 校验网页登录返回的令牌，并保留服务端轮换后的最新令牌。
@@ -242,6 +502,18 @@ func (adapter *sub2APIAdapter) readCurrentUser(ctx context.Context, session *req
 }
 
 func sub2APIEnvelopeObject(payload any, auth bool) (map[string]any, error) {
+	value, err := sub2APIEnvelopeValue(payload, auth)
+	if err != nil {
+		return nil, err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, checkError(ErrorClassResponse, "解析 Sub2API 响应", "Sub2API data 格式无效", 0, nil)
+	}
+	return object, nil
+}
+
+func sub2APIEnvelopeValue(payload any, auth bool) (any, error) {
 	object, ok := payload.(map[string]any)
 	if !ok {
 		return nil, checkError(ErrorClassResponse, "解析 Sub2API 响应", "Sub2API 响应格式无效", 0, nil)
@@ -256,10 +528,7 @@ func sub2APIEnvelopeObject(payload any, auth bool) (map[string]any, error) {
 		return nil, checkError(class, "解析 Sub2API 响应", message, 0, nil)
 	}
 	if data, exists := object["data"]; exists {
-		if typed, ok := data.(map[string]any); ok {
-			return typed, nil
-		}
-		return nil, checkError(ErrorClassResponse, "解析 Sub2API 响应", "Sub2API data 格式无效", 0, nil)
+		return data, nil
 	}
 	return object, nil
 }
@@ -283,3 +552,4 @@ func sub2APIUserEnabled(user map[string]any) bool {
 
 var _ Adapter = (*sub2APIAdapter)(nil)
 var _ BrowserCredentialVerifier = (*sub2APIAdapter)(nil)
+var _ GroupMultiplierReader = (*sub2APIAdapter)(nil)

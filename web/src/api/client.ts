@@ -8,6 +8,7 @@ import type {
   EmailSettings,
   EmailSettingsInput,
   HistoryResult,
+  TargetMultiplierState,
   PushInfo,
   Settings,
   Target,
@@ -89,6 +90,13 @@ export const api = {
     method: 'POST',
     body: jsonBody({ accountIds })
   }),
+  multiplierState: (id: string) => apiRequest<TargetMultiplierState>(`/api/targets/${encodeURIComponent(id)}/group-multipliers`),
+  detectMultiplierGroups: (id: string) => apiRequest<TargetMultiplierState>(`/api/targets/${encodeURIComponent(id)}/group-multipliers/detect`, { method: 'POST' }),
+  saveMultiplierGroups: (id: string, groupKeys: string[]) => apiRequest<TargetMultiplierState>(`/api/targets/${encodeURIComponent(id)}/group-multipliers`, {
+    method: 'PUT',
+    body: jsonBody({ groupKeys })
+  }),
+  checkMultiplierGroups: (id: string) => apiRequest<TargetMultiplierState>(`/api/targets/${encodeURIComponent(id)}/group-multipliers/check`, { method: 'POST' }),
   checkAll: () => apiRequest<void>('/api/checks', { method: 'POST' }),
   history: (id: string, metric?: string) => apiRequest<HistoryResult>(`/api/targets/${encodeURIComponent(id)}/history${metric ? `?metric=${encodeURIComponent(metric)}` : ''}`),
   alerts: (status = 'all') => apiRequest<Alert[]>(`/api/alerts?status=${encodeURIComponent(status)}`),

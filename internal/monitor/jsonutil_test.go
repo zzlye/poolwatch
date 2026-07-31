@@ -42,3 +42,17 @@ func TestDecimalJSON始终输出字符串(t *testing.T) {
 		t.Fatalf("十进制值没有按字符串输出：%s", data)
 	}
 }
+
+func Test数值解析在展开前拒绝巨大科学计数法(t *testing.T) {
+	for _, value := range []any{"1e100000000", "1e-100000000"} {
+		if _, err := parseDecimal(value); err == nil {
+			t.Fatalf("巨大指数应被拒绝：%v", value)
+		}
+		if _, err := parseInt64(value); err == nil {
+			t.Fatalf("巨大整数应被拒绝：%v", value)
+		}
+		if code := parseStatusCode(value); code != 0 {
+			t.Fatalf("无效状态码应安全返回零：%v", code)
+		}
+	}
+}

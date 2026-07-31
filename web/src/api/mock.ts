@@ -5,6 +5,7 @@ import type {
   DashboardData,
   DetectTargetResult,
   EmailSettings,
+  GroupMultiplier,
   HistoryResult,
   PushInfo,
   SanitizedAccount,
@@ -12,6 +13,7 @@ import type {
   Target,
   TargetAuthAttempt,
   TargetDraft,
+  TargetMultiplierState,
   TargetStatus,
   TestConnectionResult,
   TotpSetup
@@ -168,8 +170,61 @@ let alerts: Alert[] = [
     status: 'resolved',
     createdAt: minutesAgo(180),
     resolvedAt: minutesAgo(174)
+  },
+  {
+    id: 'alert-multiplier',
+    targetId: 'new-api-main',
+    targetName: '主站额度',
+    type: 'multiplier_changed',
+    title: '分组倍率已变更',
+    message: '检测到分组倍率变化：会员分组：0.5× → 0.333333×。',
+    severity: 'warning',
+    status: 'resolved',
+    createdAt: minutesAgo(12)
   }
 ]
+
+const multiplierCatalog = new Map<string, GroupMultiplier[]>([
+  ['new-api-main', [
+    { key: 'default', name: '默认分组', description: '默认可用分组', multiplier: '1', monitored: false, status: 'unknown' },
+    { key: 'vip', name: '会员分组', description: '会员专属价格', multiplier: '0.333333', monitored: false, status: 'unknown' },
+    { key: 'high', name: '高性能分组', multiplier: '1.5', monitored: false, status: 'unknown' }
+  ]],
+  ['sub2api-backup', [
+    { key: '10', name: '基础组', description: '公开分组', multiplier: '1.25', monitored: false, status: 'unknown' },
+    { key: '11', name: '订阅组', multiplier: '0.8', monitored: false, status: 'unknown' }
+  ]]
+])
+
+const multiplierSelections = new Map<string, Set<string>>([
+  ['new-api-main', new Set(['default'])]
+])
+
+const multiplierCheckedAt = new Map<string, string>([
+  ['new-api-main', minutesAgo(2)]
+])
+
+function mockMultiplierState(target: Target, includeDetected: boolean): TargetMultiplierState {
+  const selected = multiplierSelections.get(target.id) ?? new Set<string>()
+  const catalog = multiplierCatalog.get(target.id) ?? []
+  const checkedAt = multiplierCheckedAt.get(target.id)
+  const groups = catalog
+    .filter((group) => includeDetected || selected.has(group.key))
+    .map((group) => ({
+      ...group,
+      monitored: selected.has(group.key),
+      status: selected.has(group.key) ? 'stable' as const : 'unknown' as const,
+      lastCheckedAt: selected.has(group.key) ? checkedAt : undefined
+    }))
+  return {
+    targetId: target.id,
+    targetName: target.name,
+    targetKind: target.kind as TargetMultiplierState['targetKind'],
+    enabled: target.enabled,
+    groups,
+    lastCheckedAt: selected.size > 0 ? checkedAt : undefined
+  }
+}
 
 let settings: Settings = {
   productName: '号池监控',
@@ -289,6 +344,9 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
   if (cleanPath === '/api/targets' && method === 'POST') {
     const target = targetFromDraft(body)
     targets = [target, ...targets]
+    if (target.kind === 'new_api' || target.kind === 'sub2api') {
+      multiplierCatalog.set(target.id, [])
+    }
     return target as T
   }
   if (cleanPath === '/api/targets/detect') {
@@ -354,6 +412,24 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
       }
       return result as T
     }
+    if (parts[4] === 'group-multipliers') {
+      if (target.kind !== 'new_api' && target.kind !== 'sub2api') throw new Error('该渠道不支持倍率监控')
+      if (method === 'GET') return mockMultiplierState(target, false) as T
+      if (method === 'PUT') {
+        const groupKeys = Array.isArray(body?.groupKeys) ? body.groupKeys.map(String) : []
+        const catalogKeys = new Set((multiplierCatalog.get(id) ?? []).map((group) => group.key))
+        if (groupKeys.length > 500 || new Set(groupKeys).size !== groupKeys.length || groupKeys.some((key: string) => !catalogKeys.has(key))) {
+          throw new Error('分组列表已经变化，请重新检测后再保存')
+        }
+        multiplierSelections.set(id, new Set(groupKeys))
+        multiplierCheckedAt.set(id, new Date().toISOString())
+        return mockMultiplierState(target, true) as T
+      }
+      if (method === 'POST' && (parts[5] === 'detect' || parts[5] === 'check')) {
+        multiplierCheckedAt.set(id, new Date().toISOString())
+        return mockMultiplierState(target, true) as T
+      }
+    }
     if (parts[4] === 'history') {
       const metric = new URL(path, window.location.origin).searchParams.get('metric') ?? undefined
       return makeHistory(target, metric) as T
@@ -366,6 +442,9 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
     }
     if (method === 'DELETE') {
       targets = targets.filter((item) => item.id !== id)
+      multiplierCatalog.delete(id)
+      multiplierSelections.delete(id)
+      multiplierCheckedAt.delete(id)
       return { ok: true } as T
     }
     return target as T

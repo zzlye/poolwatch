@@ -168,6 +168,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			observed_at TEXT NOT NULL,
 			PRIMARY KEY(target_id, external_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS group_multiplier_monitors (
+			target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+			group_key TEXT NOT NULL,
+			group_name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			current_multiplier TEXT NOT NULL,
+			previous_multiplier TEXT NOT NULL DEFAULT '',
+			missing INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			last_checked_at TEXT,
+			last_changed_at TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(target_id, group_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_group_multiplier_target ON group_multiplier_monitors(target_id, group_name)`,
 		`CREATE TABLE IF NOT EXISTS audit_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_type TEXT NOT NULL,

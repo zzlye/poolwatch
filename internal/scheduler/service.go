@@ -33,6 +33,7 @@ type Service struct {
 	now                 func() time.Time
 	onError             func(error)
 	onSnapshot          func(string)
+	onMultiplier        func(string)
 	wait                sync.WaitGroup
 }
 
@@ -43,7 +44,7 @@ func NewService(database *store.Store, vault *secure.Vault, runner monitor.Runne
 		allowPrivateTargets: allowPrivateTargets, checkTimeout: 20 * time.Second, tickInterval: 15 * time.Second,
 		semaphore: make(chan struct{}, 4), running: make(map[string]struct{}),
 		now: func() time.Time { return time.Now().UTC() }, onError: func(error) {},
-		onSnapshot: func(string) {},
+		onSnapshot: func(string) {}, onMultiplier: func(string) {},
 	}
 }
 
@@ -58,6 +59,13 @@ func (s *Service) SetErrorHandler(handler func(error)) {
 func (s *Service) SetSnapshotHandler(handler func(string)) {
 	if handler != nil {
 		s.onSnapshot = handler
+	}
+}
+
+// SetMultiplierHandler 设置倍率状态变化后的实时刷新回调。
+func (s *Service) SetMultiplierHandler(handler func(string)) {
+	if handler != nil {
+		s.onMultiplier = handler
 	}
 }
 
@@ -213,6 +221,65 @@ func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, acc
 	return result, nil
 }
 
+// DetectGroupMultipliers 实时读取渠道分组，并同时检查已经选择监控的倍率。
+func (s *Service) DetectGroupMultipliers(ctx context.Context, targetID string) ([]monitor.GroupMultiplier, error) {
+	if !s.acquireTarget(targetID) {
+		return nil, ErrAlreadyRunning
+	}
+	defer s.releaseTarget(targetID)
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	target, err := s.store.TargetByID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	return s.checkGroupMultipliersUnlocked(ctx, &target)
+}
+
+// SaveGroupMultiplierSelection 重新读取上游后保存选择，新分组只建立基准而不告警。
+func (s *Service) SaveGroupMultiplierSelection(ctx context.Context, targetID string, groupKeys []string) ([]monitor.GroupMultiplier, error) {
+	if !s.acquireTarget(targetID) {
+		return nil, ErrAlreadyRunning
+	}
+	defer s.releaseTarget(targetID)
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	target, err := s.store.TargetByID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if !supportsGroupMultipliers(target.Kind) {
+		return nil, errors.New("只有 New API 和 Sub2API 渠道支持倍率监控")
+	}
+	now := s.now()
+	if len(groupKeys) == 0 {
+		if err := s.store.SyncGroupMultiplierSelection(ctx, targetID, nil, nil, now); err != nil {
+			return nil, err
+		}
+		s.onMultiplier(targetID)
+		return []monitor.GroupMultiplier{}, nil
+	}
+	groups, err := s.readGroupMultipliersUnlocked(ctx, &target)
+	if err != nil {
+		_ = s.store.MarkGroupMultiplierCheckFailure(ctx, targetID, safeGroupMultiplierError(err), now)
+		s.onMultiplier(targetID)
+		return nil, err
+	}
+	if err := s.store.SyncGroupMultiplierSelection(ctx, targetID, groupKeys, groupMultiplierObservations(groups), now); err != nil {
+		return nil, err
+	}
+	s.onMultiplier(targetID)
+	return groups, nil
+}
+
 // LockTarget 等待并独占一个渠道，供配置更新与检测共享同一把渠道锁。
 func (s *Service) LockTarget(ctx context.Context, targetID string) (func(), error) {
 	if s.acquireTarget(targetID) {
@@ -328,8 +395,8 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 		return err
 	}
 	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
-	defer cancel()
 	snapshot, checkErr := s.runner.Run(timeoutContext, runtimeConfig)
+	cancel()
 	currentTarget, reloadErr := s.store.TargetByID(ctx, target.ID)
 	if errors.Is(reloadErr, sql.ErrNoRows) {
 		// 检测期间渠道已删除，旧结果不再具有保存意义。
@@ -351,20 +418,14 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 			return errors.Join(checkErr, err)
 		}
 		s.onSnapshot(target.ID)
+		if _, multiplierErr := s.checkSelectedGroupMultipliers(ctx, &target); multiplierErr != nil && ctx.Err() == nil {
+			// 钱包等常规指标失败时倍率接口仍可能正常，倍率监控必须独立继续运行。
+			s.onError(multiplierErr)
+		}
 		return checkErr
 	}
 	if snapshot.CredentialUpdate != nil {
-		updatedCredential := *snapshot.CredentialUpdate
-		updatedCredential.TOTPCode = ""
-		encoded, err := json.Marshal(updatedCredential)
-		if err != nil {
-			return errors.New("编码续期凭据失败")
-		}
-		encrypted, err := s.vault.Encrypt(encoded)
-		if err != nil {
-			return err
-		}
-		if err := s.store.UpdateTargetCredentials(ctx, target.ID, encrypted, s.now()); err != nil {
+		if err := s.persistCredentialUpdate(ctx, &target, snapshot.CredentialUpdate); err != nil {
 			return err
 		}
 		snapshot.CredentialUpdate = nil
@@ -373,7 +434,126 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 		return err
 	}
 	s.onSnapshot(target.ID)
+	lookupComplete, multiplierErr := s.checkSelectedGroupMultipliers(ctx, &target)
+	if multiplierErr != nil {
+		if ctx.Err() == nil {
+			s.onError(multiplierErr)
+		}
+		if !lookupComplete {
+			return multiplierErr
+		}
+	}
 	return nil
+}
+
+func (s *Service) checkSelectedGroupMultipliers(ctx context.Context, target *store.Target) (bool, error) {
+	monitored, err := s.store.HasGroupMultiplierMonitors(ctx, target.ID)
+	if err != nil {
+		return false, err
+	}
+	if !monitored {
+		return true, nil
+	}
+	_, err = s.checkGroupMultipliersUnlocked(ctx, target)
+	return true, err
+}
+
+func (s *Service) checkGroupMultipliersUnlocked(ctx context.Context, target *store.Target) ([]monitor.GroupMultiplier, error) {
+	now := s.now()
+	groups, err := s.readGroupMultipliersUnlocked(ctx, target)
+	if err != nil {
+		markErr := s.store.MarkGroupMultiplierCheckFailure(ctx, target.ID, safeGroupMultiplierError(err), now)
+		s.onMultiplier(target.ID)
+		return nil, errors.Join(err, markErr)
+	}
+	_, alert, err := s.store.ApplyGroupMultiplierCheck(
+		ctx, target.ID, groupMultiplierObservations(groups), string(monitor.AlertTypeMultiplierChanged), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.alerts.NotifyMultiplierChange(ctx, *target, alert)
+	s.onMultiplier(target.ID)
+	return groups, nil
+}
+
+func (s *Service) readGroupMultipliersUnlocked(ctx context.Context, target *store.Target) ([]monitor.GroupMultiplier, error) {
+	if target == nil || !supportsGroupMultipliers(target.Kind) {
+		return nil, errors.New("只有 New API 和 Sub2API 渠道支持倍率监控")
+	}
+	runtimeConfig, err := s.runtimeConfig(*target)
+	if err != nil {
+		return nil, err
+	}
+	reader, ok := s.runner.(monitor.GroupMultiplierReader)
+	if !ok {
+		return nil, errors.New("当前检测器不支持分组倍率")
+	}
+	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
+	defer cancel()
+	result, err := reader.ReadGroupMultipliers(timeoutContext, runtimeConfig)
+	if result.CredentialUpdate != nil {
+		if persistErr := s.persistCredentialUpdate(ctx, target, result.CredentialUpdate); persistErr != nil {
+			return nil, errors.Join(err, persistErr)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result.Groups, nil
+}
+
+func (s *Service) persistCredentialUpdate(ctx context.Context, target *store.Target, credential *monitor.Credential) error {
+	if target == nil || credential == nil {
+		return nil
+	}
+	updated := *credential
+	updated.TOTPCode = ""
+	encoded, err := json.Marshal(updated)
+	if err != nil {
+		return errors.New("编码续期凭据失败")
+	}
+	encrypted, err := s.vault.Encrypt(encoded)
+	if err != nil {
+		return err
+	}
+	// 上游可能已经让旧刷新令牌失效，因此客户端断开后也要在短时间内完成新令牌落库。
+	persistContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := s.store.UpdateTargetCredentials(persistContext, target.ID, encrypted, s.now()); err != nil {
+		return err
+	}
+	target.CredentialsEnc = encrypted
+	return nil
+}
+
+func groupMultiplierObservations(groups []monitor.GroupMultiplier) []store.GroupMultiplierObservation {
+	result := make([]store.GroupMultiplierObservation, 0, len(groups))
+	for _, group := range groups {
+		result = append(result, store.GroupMultiplierObservation{
+			GroupKey: group.Key, GroupName: group.Name, Description: group.Description, Multiplier: group.Multiplier.String(),
+		})
+	}
+	return result
+}
+
+func supportsGroupMultipliers(kind string) bool {
+	return kind == string(monitor.TargetKindNewAPI) || kind == string(monitor.TargetKindSub2API)
+}
+
+func safeGroupMultiplierError(err error) string {
+	switch monitor.ErrorClassOf(err) {
+	case monitor.ErrorClassAuth:
+		return "渠道登录凭据已失效，请更新登录信息。"
+	case monitor.ErrorClassNetwork, monitor.ErrorClassServer:
+		return "暂时无法连接渠道倍率接口，请稍后重试。"
+	case monitor.ErrorClassResponse:
+		return "渠道返回的分组倍率格式无法识别。"
+	case monitor.ErrorClassConfig:
+		return "渠道登录或倍率监控配置不完整。"
+	default:
+		return "分组倍率检测失败，请稍后重试。"
+	}
 }
 
 func targetMonitoringConfigChanged(previous, current store.Target) bool {

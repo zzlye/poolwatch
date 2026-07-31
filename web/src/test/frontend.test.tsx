@@ -890,6 +890,8 @@ describe('主题和实时事件', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['history'] })
     act(() => listeners.get('target.updated')?.(new Event('target.updated')))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['alerts'] })
+    act(() => listeners.get('multiplier.updated')?.(new Event('multiplier.updated')))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['group-multipliers'] })
     act(() => listeners.get('settings.updated')?.(new Event('settings.updated')))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['settings'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['email'] })

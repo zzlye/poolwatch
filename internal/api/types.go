@@ -110,6 +110,33 @@ type accountQuotaRefreshResponse struct {
 	UnsupportedCount int               `json:"unsupportedCount"`
 }
 
+type groupMultiplierSelectionRequest struct {
+	GroupKeys []string `json:"groupKeys"`
+}
+
+type groupMultiplierResponse struct {
+	Key                string     `json:"key"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description,omitempty"`
+	Multiplier         string     `json:"multiplier"`
+	PreviousMultiplier string     `json:"previousMultiplier,omitempty"`
+	Monitored          bool       `json:"monitored"`
+	Status             string     `json:"status"`
+	LastCheckedAt      *time.Time `json:"lastCheckedAt,omitempty"`
+	ChangedAt          *time.Time `json:"changedAt,omitempty"`
+	LastError          string     `json:"lastError,omitempty"`
+}
+
+type targetMultiplierStateResponse struct {
+	TargetID      string                    `json:"targetId"`
+	TargetName    string                    `json:"targetName"`
+	TargetKind    string                    `json:"targetKind"`
+	Enabled       bool                      `json:"enabled"`
+	Groups        []groupMultiplierResponse `json:"groups"`
+	LastCheckedAt *time.Time                `json:"lastCheckedAt,omitempty"`
+	LastError     string                    `json:"lastError,omitempty"`
+}
+
 type targetResponse struct {
 	ID                   string            `json:"id"`
 	Name                 string            `json:"name"`

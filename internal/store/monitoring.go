@@ -284,7 +284,7 @@ func (s *Store) ListUnnotifiedAlerts(ctx context.Context, limit int) ([]AlertWit
 		a.current_value, a.threshold_value, a.unit, a.opened_at, a.recovered_at, a.last_notified_at, t.name
 		FROM alerts a JOIN targets t ON t.id = a.target_id
 		WHERE a.last_notified_at IS NULL
-			AND (a.state IN ('open', 'acknowledged') OR a.type = 'recovered')
+			AND (a.state IN ('open', 'acknowledged') OR a.type IN ('recovered', 'multiplier_changed'))
 		ORDER BY a.opened_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err

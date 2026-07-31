@@ -60,7 +60,7 @@ func updateTarget(ctx context.Context, executor targetExecutor, target Target) e
 }
 
 // UpdateTargetAndMonitoring 在同一事务中更新渠道配置与关联监控状态，避免只完成其中一部分。
-func (s *Store) UpdateTargetAndMonitoring(ctx context.Context, target Target, mode TargetMonitoringUpdateMode, removedMetricKeys []string) error {
+func (s *Store) UpdateTargetAndMonitoring(ctx context.Context, target Target, mode TargetMonitoringUpdateMode, removedMetricKeys []string, resetMultiplierBaseline bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -81,6 +81,14 @@ func (s *Store) UpdateTargetAndMonitoring(ctx context.Context, target Target, mo
 		}
 	default:
 		return fmt.Errorf("渠道监控更新模式无效")
+	}
+	if resetMultiplierBaseline && mode != TargetMonitoringResetHistory {
+		if _, err := tx.ExecContext(ctx, `UPDATE group_multiplier_monitors SET
+			current_multiplier = '', previous_multiplier = '', missing = 0, last_error = '',
+			last_checked_at = NULL, last_changed_at = NULL, updated_at = ? WHERE target_id = ?`,
+			formatTime(target.UpdatedAt), target.ID); err != nil {
+			return fmt.Errorf("重置倍率监控基准失败: %w", err)
+		}
 	}
 	return tx.Commit()
 }
@@ -177,6 +185,7 @@ func resetTargetMonitoringTx(ctx context.Context, tx *sql.Tx, id string, updated
 		`DELETE FROM snapshots WHERE target_id = ?`,
 		`DELETE FROM alerts WHERE target_id = ?`,
 		`DELETE FROM chat_accounts WHERE target_id = ?`,
+		`DELETE FROM group_multiplier_monitors WHERE target_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, query, id); err != nil {
 			return fmt.Errorf("重置渠道历史失败: %w", err)

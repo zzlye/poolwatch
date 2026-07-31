@@ -29,6 +29,7 @@ test('390×844：手机页面无横向滚动、底部导航不遮挡设置页内
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/settings$/)
   await expect(page.getByRole('heading', { name: '系统与安全' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '邮件提醒' })).toBeVisible()
   await page.locator('.settings-footer').scrollIntoViewIfNeeded()
   await expectNoHorizontalScroll(page)
 

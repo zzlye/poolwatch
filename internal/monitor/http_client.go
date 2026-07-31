@@ -12,7 +12,6 @@ import (
 	"net/http/cookiejar"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -341,10 +340,9 @@ func statusCodeOf(err error) int {
 }
 
 func parseStatusCode(value any) int {
-	parsed, err := parseDecimal(value)
-	if err != nil {
+	parsed, err := parseInt64(value)
+	if err != nil || parsed < -2147483648 || parsed > 2147483647 {
 		return 0
 	}
-	result, _ := strconv.Atoi(parsed.StringFixed(0))
-	return result
+	return int(parsed)
 }

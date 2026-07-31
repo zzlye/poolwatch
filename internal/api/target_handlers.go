@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -108,7 +109,12 @@ func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusInternalServerError, "读取渠道失败")
 		return
 	}
-	target, _, err := s.buildTarget(request.Context(), draft, &existing, false)
+	previousCredential, _, err := s.existingCredential(&existing, monitor.TargetKind(existing.Kind))
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "读取原渠道凭据失败")
+		return
+	}
+	target, runtimeConfig, err := s.buildTarget(request.Context(), draft, &existing, false)
 	if err != nil {
 		writeAPIError(response, http.StatusBadRequest, err.Error())
 		return
@@ -127,13 +133,20 @@ func (s *Server) handleUpdateTarget(response http.ResponseWriter, request *http.
 			return
 		}
 	}
-	if err := s.dependencies.Store.UpdateTargetAndMonitoring(request.Context(), target, monitoringMode, removedMetricKeys); err != nil {
+	previousCredential.TOTPCode = ""
+	currentCredential := runtimeConfig.Credential
+	currentCredential.TOTPCode = ""
+	credentialChanged := !monitoringIdentityChanged && !reflect.DeepEqual(previousCredential, currentCredential)
+	if err := s.dependencies.Store.UpdateTargetAndMonitoring(request.Context(), target, monitoringMode, removedMetricKeys, credentialChanged); err != nil {
 		writeAPIError(response, http.StatusInternalServerError, "更新渠道失败")
 		return
 	}
 	s.targetAuth.consume(draft.BrowserAuthAttemptID, adminFromContext(request.Context()).ID)
 	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.updated", target.ID, "更新渠道", time.Now().UTC())
 	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": target.ID})
+	if monitoringIdentityChanged || credentialChanged {
+		s.dependencies.Events.Publish("multiplier.updated", map[string]string{"targetId": target.ID})
+	}
 	stored, _ := s.dependencies.Store.TargetByID(request.Context(), target.ID)
 	mapped, err := s.mapTarget(request.Context(), stored)
 	if err != nil {

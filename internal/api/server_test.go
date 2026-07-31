@@ -99,6 +99,16 @@ func (apiTestRunner) VerifyBrowserCredential(_ context.Context, target monitor.T
 	}
 }
 
+func (apiTestRunner) ReadGroupMultipliers(_ context.Context, target monitor.TargetInput) (monitor.GroupMultiplierResult, error) {
+	if target.Kind != monitor.TargetKindNewAPI && target.Kind != monitor.TargetKindSub2API {
+		return monitor.GroupMultiplierResult{}, &monitor.CheckError{Kind: monitor.ErrorClassConfig, Message: "渠道不支持倍率监控"}
+	}
+	return monitor.GroupMultiplierResult{Groups: []monitor.GroupMultiplier{
+		{Key: "default", Name: "默认分组", Description: "默认可用分组", Multiplier: decimal.NewFromInt(1)},
+		{Key: "vip", Name: "会员分组", Multiplier: decimal.RequireFromString("0.333333")},
+	}}, nil
+}
+
 func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	testServer, database, vault := newAPITestServer(t)
 	defer testServer.Close()

@@ -289,7 +289,7 @@ func TestUpdateTargetAndMonitoring任一步失败都会回滚(t *testing.T) {
 	}
 	target.Name = "不应保存的新名称"
 	target.UpdatedAt = now.Add(time.Minute)
-	if err := database.UpdateTargetAndMonitoring(ctx, target, TargetMonitoringUpdateMode("invalid"), nil); err == nil {
+	if err := database.UpdateTargetAndMonitoring(ctx, target, TargetMonitoringUpdateMode("invalid"), nil, false); err == nil {
 		t.Fatal("无效监控更新模式应返回错误")
 	}
 	stored, err := database.TargetByID(ctx, target.ID)

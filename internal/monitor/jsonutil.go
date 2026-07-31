@@ -69,7 +69,53 @@ func parseDecimal(value any) (decimal.Decimal, error) {
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("无法解析数值")
 	}
+	// 所有远端数值先限制规模，避免后续比较、整数转换或字符串展开被巨大指数拖垮。
+	if parsed.Exponent() < -1000 || parsed.Exponent() > 1000 || parsed.Coefficient().BitLen() > 4096 {
+		return decimal.Zero, fmt.Errorf("数值超出安全范围")
+	}
 	return parsed, nil
+}
+
+func parseGroupMultiplierDecimal(value any) (decimal.Decimal, error) {
+	parsed, err := parseDecimal(value)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	// 上游输入可能使用巨大科学计数法；先限制指数和有效数字，再允许调用 String 展开。
+	if parsed.Exponent() < -50 || parsed.Exponent() > 50 || parsed.Coefficient().BitLen() > 128 {
+		return decimal.Zero, fmt.Errorf("倍率数值超出安全范围")
+	}
+	return parsed, nil
+}
+
+func parsePositiveInt64String(value any) (string, error) {
+	parsed, err := parseInt64(value)
+	if err != nil {
+		return "", err
+	}
+	if parsed <= 0 {
+		return "", fmt.Errorf("数值不是正整数")
+	}
+	return strconv.FormatInt(parsed, 10), nil
+}
+
+func parseInt64(value any) (int64, error) {
+	parsed, err := parseDecimal(value)
+	if err != nil {
+		return 0, err
+	}
+	// 在 BigInt 或十进制字符串展开前限制规模，避免巨大科学计数法消耗内存。
+	if parsed.Exponent() < -18 || parsed.Exponent() > 18 || parsed.Coefficient().BitLen() > 128 {
+		return 0, fmt.Errorf("整数数值超出安全范围")
+	}
+	if !parsed.Equal(parsed.Truncate(0)) {
+		return 0, fmt.Errorf("数值不是整数")
+	}
+	integer := parsed.BigInt()
+	if !integer.IsInt64() {
+		return 0, fmt.Errorf("整数数值超出范围")
+	}
+	return integer.Int64(), nil
 }
 
 func decimalField(object map[string]any, names ...string) (decimal.Decimal, error) {
@@ -81,12 +127,26 @@ func decimalField(object map[string]any, names ...string) (decimal.Decimal, erro
 	return decimal.Zero, fmt.Errorf("缺少数值字段")
 }
 
-func int64Field(object map[string]any, names ...string) int64 {
-	value, err := decimalField(object, names...)
-	if err != nil {
-		return 0
+func firstValue(object map[string]any, names ...string) (any, bool) {
+	for _, name := range names {
+		if value, exists := object[name]; exists {
+			return value, true
+		}
 	}
-	return value.IntPart()
+	return nil, false
+}
+
+func int64Field(object map[string]any, names ...string) int64 {
+	for _, name := range names {
+		if value, ok := object[name]; ok {
+			parsed, err := parseInt64(value)
+			if err == nil {
+				return parsed
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 func stringField(object map[string]any, names ...string) string {

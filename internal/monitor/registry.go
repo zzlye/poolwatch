@@ -138,6 +138,42 @@ func (registry *Registry) VerifyBrowserCredential(ctx context.Context, target Ta
 	return verifier.VerifyBrowserCredential(ctx, target)
 }
 
+// ReadGroupMultipliers 读取 New API 或 Sub2API 当前用户可用的分组倍率。
+func (registry *Registry) ReadGroupMultipliers(ctx context.Context, target TargetInput) (GroupMultiplierResult, error) {
+	adapter, err := registry.Adapter(target.Kind)
+	if err != nil {
+		return GroupMultiplierResult{}, err
+	}
+	reader, ok := adapter.(GroupMultiplierReader)
+	if !ok {
+		return GroupMultiplierResult{}, checkError(ErrorClassConfig, "读取分组倍率", "该渠道不支持分组倍率监控", 0, nil)
+	}
+	var result GroupMultiplierResult
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err = reader.ReadGroupMultipliers(ctx, target)
+		if err == nil {
+			return result, nil
+		}
+		kind := ErrorClassOf(err)
+		if kind != ErrorClassNetwork && kind != ErrorClassServer {
+			return result, err
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return GroupMultiplierResult{}, checkError(ErrorClassNetwork, "重试分组倍率检测", "分组倍率检测已取消或超时", 0, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return result, err
+}
+
 func runWithRetry(ctx context.Context, run func() (Result, any, error)) (Result, any, error) {
 	var result Result
 	var sample any
@@ -178,3 +214,4 @@ var _ AccountQuotaRefresher = (*Registry)(nil)
 var _ Prober = (*Registry)(nil)
 var _ Detector = (*Registry)(nil)
 var _ BrowserCredentialVerifier = (*Registry)(nil)
+var _ GroupMultiplierReader = (*Registry)(nil)
