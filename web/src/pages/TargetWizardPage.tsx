@@ -10,6 +10,7 @@ import { metricLabels, targetKindLabels } from '../types'
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
 // 浏览器助手压缩包随页面一起发布，桌面端安装后即可读取当前填写站点的会话。
 const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.1.0.zip'
+const minimumBrowserHelperVersion = [1, 1, 0] as const
 const browserHelperInstallMessage = '安装浏览器助手并刷新本页后，即可一键读取已登录站点。'
 const browserHelperUpdateMessage = '当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。'
 const androidHTTPSMessage = '安卓端网页登录仅支持 HTTPS 渠道地址。请返回上一步填写 HTTPS 地址，或使用桌面端浏览器助手导入当前登录状态。'
@@ -31,11 +32,15 @@ interface BrowserHelperReady {
   capabilities?: string[]
 }
 
-function supportsBrowserHelper(kind: TargetKind, capabilities: string[]): boolean {
-  // 旧版助手没有能力列表，仅保留既有的 New API 一键读取兼容性。
-  return kind === 'new_api'
-    ? capabilities.length === 0 || capabilities.includes('new_api')
-    : capabilities.includes('sub2api')
+export function supportsBrowserHelper(kind: TargetKind, version: string, capabilities: string[]): boolean {
+  // 两类渠道都要求助手明确声明当前能力，避免旧助手被误判为仅支持其中一种渠道。
+  const parts = version.split('.').map((part) => Number(part))
+  if (parts.length < 3 || parts.some((part) => !Number.isInteger(part) || part < 0)) return false
+  for (let index = 0; index < minimumBrowserHelperVersion.length; index += 1) {
+    if (parts[index] > minimumBrowserHelperVersion[index]) break
+    if (parts[index] < minimumBrowserHelperVersion[index]) return false
+  }
+  return capabilities.includes(kind)
 }
 
 function isHTTPSAddress(value: string): boolean {
@@ -265,6 +270,7 @@ function BrowserAuthorizationFields({
   const [callbackError, setCallbackError] = useState('')
   const [callbackImported, setCallbackImported] = useState(false)
   const [browserHelperCapabilities, setBrowserHelperCapabilities] = useState<string[] | null>(null)
+  const [browserHelperVersion, setBrowserHelperVersion] = useState('')
   const [browserHelperMessage, setBrowserHelperMessage] = useState('')
   const [browserHelperImporting, setBrowserHelperImporting] = useState(false)
   const [showBrowserHelperInstall, setShowBrowserHelperInstall] = useState(false)
@@ -274,7 +280,7 @@ function BrowserAuthorizationFields({
   const helperTimeout = useRef(0)
   const browserHelperDetected = browserHelperCapabilities !== null
   const detectedCapabilities = browserHelperCapabilities ?? []
-  const browserHelperReady = browserHelperDetected && supportsBrowserHelper(draft.kind, detectedCapabilities)
+  const browserHelperReady = browserHelperDetected && supportsBrowserHelper(draft.kind, browserHelperVersion, detectedCapabilities)
   const androidRequiresHTTPS = isAndroidApp && !isHTTPSAddress(draft.baseUrl)
 
   const applyAttempt = (next: TargetAuthAttempt) => {
@@ -363,6 +369,7 @@ function BrowserAuthorizationFields({
   useEffect(() => {
     if (isAndroidApp) return
     setBrowserHelperCapabilities(null)
+    setBrowserHelperVersion('')
     const announce = () => window.postMessage({ source: 'poolwatch-page', type: 'POOLWATCH_BROWSER_HELPER_PING' }, window.location.origin)
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== window.location.origin) return
@@ -373,8 +380,10 @@ function BrowserAuthorizationFields({
         const capabilities = Array.isArray(ready.capabilities)
           ? [...new Set(ready.capabilities.filter((item): item is string => typeof item === 'string'))]
           : []
-        const readyForCurrentKind = supportsBrowserHelper(draft.kind, capabilities)
+        const version = typeof ready.version === 'string' ? ready.version.trim() : ''
+        const readyForCurrentKind = supportsBrowserHelper(draft.kind, version, capabilities)
         setBrowserHelperCapabilities(capabilities)
+        setBrowserHelperVersion(version)
         if (readyForCurrentKind) {
           setShowBrowserHelperInstall(false)
           // 心跳只清理安装类提示，保留读取中、成功和失败结果供用户查看。

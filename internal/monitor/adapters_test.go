@@ -359,6 +359,58 @@ func TestSub2API访问令牌失效后自动刷新(t *testing.T) {
 	assertMetric(t, snapshot, MetricWalletBalance, "9.5", "USD")
 }
 
+func TestSub2API刷新令牌失效后使用密码自动重新登录(t *testing.T) {
+	var refreshRequests atomic.Int32
+	var loginRequests atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/me", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer login-renewed" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{"balance": "6.5", "status": "active"}})
+	})
+	mux.HandleFunc("/api/v1/auth/refresh", func(writer http.ResponseWriter, request *http.Request) {
+		refreshRequests.Add(1)
+		writer.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/v1/auth/login", func(writer http.ResponseWriter, request *http.Request) {
+		loginRequests.Add(1)
+		var body map[string]string
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		if body["email"] != "demo@example.com" || body["password"] != "secret" {
+			writer.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		writeTestJSON(writer, map[string]any{"code": 0, "data": map[string]any{
+			"access_token": "login-renewed", "refresh_token": "login-rotated", "expires_in": 3600,
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newSub2APIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	snapshot, err := adapter.Check(context.Background(), TargetConfig{
+		ID:                  "sub-refresh-fallback-login",
+		BaseURL:             server.URL,
+		AllowPrivateNetwork: true,
+		Credential: Credential{
+			Email: "demo@example.com", Password: "secret",
+			AccessToken: "expired-access", RefreshToken: "expired-refresh",
+		},
+	})
+	if err != nil {
+		t.Fatalf("刷新令牌失效后自动重新登录失败：%v", err)
+	}
+	if refreshRequests.Load() != 1 || loginRequests.Load() != 1 {
+		t.Fatalf("续期与重新登录次数不符合预期，refresh=%d login=%d", refreshRequests.Load(), loginRequests.Load())
+	}
+	if snapshot.CredentialUpdate == nil || snapshot.CredentialUpdate.AccessToken != "login-renewed" || snapshot.CredentialUpdate.RefreshToken != "login-rotated" {
+		t.Fatalf("重新登录后的令牌未返回给调度层持久化：%#v", snapshot.CredentialUpdate)
+	}
+	assertMetric(t, snapshot, MetricWalletBalance, "6.5", "USD")
+}
+
 func TestSub2API缓存过期后优先使用轮换刷新令牌(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/refresh", func(writer http.ResponseWriter, request *http.Request) {

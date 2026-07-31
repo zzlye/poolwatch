@@ -6,6 +6,10 @@ import { targetKindLabels } from '../types'
 import { StatusPill } from './StatusPill'
 
 function primaryMetric(target: Target) {
+  // CLIProxyAPI 的总账号数只反映号池规模，渠道列表应优先展示真正可用的账号数。
+  if (target.kind === 'cliproxyapi') {
+    return target.metrics.find((metric) => metric.key === 'healthy_accounts') ?? target.metrics[0]
+  }
   return target.metrics.find((metric) => ['wallet_balance', 'subscription_balance', 'image_quota'].includes(metric.key)) ?? target.metrics[0]
 }
 

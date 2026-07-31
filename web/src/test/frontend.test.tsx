@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AuthPage from '../pages/AuthPage'
 import SettingsPage from '../pages/SettingsPage'
-import TargetWizardPage, { parseSub2APIOAuthCallback, targetToDraft } from '../pages/TargetWizardPage'
+import TargetWizardPage, { parseSub2APIOAuthCallback, supportsBrowserHelper, targetToDraft } from '../pages/TargetWizardPage'
 import TargetDetailPage from '../pages/TargetDetailPage'
 import { AppShell } from '../components/AppShell'
 import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
@@ -185,6 +185,17 @@ describe('渠道向导', () => {
     expect(screen.getByRole('link', { name: '更新浏览器助手' })).toHaveAttribute('href', '/downloads/poolwatch-browser-helper-v1.1.0.zip')
   })
 
+  it('New API 与 Sub2API 对浏览器助手版本和能力执行相同校验', () => {
+    for (const kind of ['new_api', 'sub2api'] as const) {
+      expect(supportsBrowserHelper(kind, '', [])).toBe(false)
+      expect(supportsBrowserHelper(kind, '1.0.9', ['new_api', 'sub2api'])).toBe(false)
+      expect(supportsBrowserHelper(kind, '1.1.0', ['new_api', 'sub2api'])).toBe(true)
+      expect(supportsBrowserHelper(kind, '1.2.0', ['new_api', 'sub2api'])).toBe(true)
+    }
+    expect(supportsBrowserHelper('new_api', '1.1.0', ['sub2api'])).toBe(false)
+    expect(supportsBrowserHelper('sub2api', '1.1.0', ['new_api'])).toBe(false)
+  })
+
   it('浏览器助手缺少当前渠道能力时立即显示更新步骤', async () => {
     renderWithClient(
       <MemoryRouter initialEntries={['/targets/new']}>
@@ -260,7 +271,12 @@ describe('渠道向导', () => {
       window.dispatchEvent(new MessageEvent('message', {
         source: window,
         origin: window.location.origin,
-        data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+        data: {
+          source: 'poolwatch-extension',
+          type: 'POOLWATCH_BROWSER_HELPER_READY',
+          version: '1.1.0',
+          capabilities: ['new_api', 'sub2api']
+        }
       }))
     })
     expect(await screen.findByText('已连接')).toBeInTheDocument()
@@ -327,7 +343,12 @@ describe('渠道向导', () => {
         window.dispatchEvent(new MessageEvent('message', {
           source: window,
           origin: window.location.origin,
-          data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+          data: {
+            source: 'poolwatch-extension',
+            type: 'POOLWATCH_BROWSER_HELPER_READY',
+            version: '1.1.0',
+            capabilities: ['new_api', 'sub2api']
+          }
         }))
       })
     }
@@ -401,7 +422,12 @@ describe('渠道向导', () => {
         window.dispatchEvent(new MessageEvent('message', {
           source: window,
           origin: window.location.origin,
-          data: { source: 'poolwatch-extension', type: 'POOLWATCH_BROWSER_HELPER_READY' }
+          data: {
+            source: 'poolwatch-extension',
+            type: 'POOLWATCH_BROWSER_HELPER_READY',
+            version: '1.1.0',
+            capabilities: ['new_api', 'sub2api']
+          }
         }))
       })
     }

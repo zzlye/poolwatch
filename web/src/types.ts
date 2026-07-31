@@ -268,7 +268,7 @@ export const metricLabels: Record<MetricKey, string> = {
   subscription_balance: '订阅额度',
   image_quota: '图片额度',
   account_total: '账号总数',
-  healthy_accounts: '正常账号',
+  healthy_accounts: '可用账号',
   limited_accounts: '限流账号',
   error_accounts: '异常账号',
   disabled_accounts: '禁用账号'

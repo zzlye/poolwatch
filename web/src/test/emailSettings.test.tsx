@@ -64,7 +64,15 @@ describe('邮件提醒设置', () => {
     renderSettingsPage()
 
     expect(await screen.findByRole('heading', { name: '邮件提醒' })).toBeInTheDocument()
-    expect(screen.getByText('无需额外付费接口')).toBeInTheDocument()
+    expect(screen.getByText('邮件提醒免费，不需要购买 API')).toBeInTheDocument()
+    expect(screen.getByText(/授权码由邮箱官方免费生成，仅用于登录发件邮箱/)).toBeInTheDocument()
+    expect((await screen.findByLabelText(/SMTP 授权码或应用密码/)).closest('label')).toHaveTextContent('SMTP 授权码或应用密码（官方免费生成）')
+    expect(await screen.findByText(/它不是付费 API Key，也不是充值码/)).toBeInTheDocument()
+    expect(screen.getByText('QQ 邮箱免费获取授权码')).toBeInTheDocument()
+    expect(screen.getByText('进入“账号与安全”，找到 SMTP/IMAP 服务并开启。')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '打开 QQ 邮箱官方设置' })).toHaveAttribute('href', 'https://wx.mail.qq.com/account')
+    expect(screen.getByRole('link', { name: '打开 QQ 邮箱官方设置' })).toHaveAttribute('target', '_blank')
+    expect(screen.getByRole('link', { name: '打开 QQ 邮箱官方设置' })).toHaveAttribute('rel', 'noopener noreferrer')
     await waitFor(() => expect(readEmail).toHaveBeenCalledOnce())
 
     fireEvent.change(await screen.findByLabelText(/邮箱服务商/), { target: { value: 'outlook' } })
@@ -72,10 +80,24 @@ describe('邮件提醒设置', () => {
     expect(screen.getByLabelText('SMTP 端口')).toHaveValue(587)
     expect(screen.getByLabelText('连接安全')).toHaveValue('starttls')
     expect(screen.getByLabelText('连接安全')).toBeDisabled()
+    expect(screen.getByText('Outlook 获取应用密码')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看 Microsoft 官方获取方法' })).toHaveAttribute('href', 'https://support.microsoft.com/account-billing/how-to-get-and-use-app-passwords-5896ed9b-4263-e681-128a-a6f2979a7944')
+
+    fireEvent.change(screen.getByLabelText(/邮箱服务商/), { target: { value: 'gmail' } })
+    expect(screen.getByText('Gmail 免费获取应用专用密码')).toBeInTheDocument()
+    expect(screen.getByText(/将生成的 16 位密码复制到本页/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '打开 Google 官方设置' })).toHaveAttribute('href', 'https://myaccount.google.com/apppasswords')
+
+    fireEvent.change(screen.getByLabelText(/邮箱服务商/), { target: { value: '163' } })
+    expect(screen.getByText('163 邮箱免费获取客户端授权码')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '打开 163 邮箱官方设置' })).toHaveAttribute('href', 'https://mail.163.com/')
 
     fireEvent.change(screen.getByLabelText(/邮箱服务商/), { target: { value: 'custom' } })
     expect(screen.getByLabelText('SMTP 服务器')).not.toHaveAttribute('readonly')
     expect(screen.getByLabelText('连接安全')).toBeEnabled()
+    expect(screen.getByText('自定义邮箱服务商配置方法')).toBeInTheDocument()
+    expect(screen.getByText(/打开邮箱服务商的官方帮助中心/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /打开.*官方设置/ })).not.toBeInTheDocument()
   })
 
   it('认证身份未变时把收件地址转为数组并沿用空白授权码', async () => {

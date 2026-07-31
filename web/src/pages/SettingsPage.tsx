@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bell, Check, Copy, KeyRound, Laptop, LoaderCircle, Mail, Moon, Save, Send, ShieldCheck, Smartphone, Sun, Trash2 } from 'lucide-react'
+import { Bell, Check, Copy, ExternalLink, KeyRound, Laptop, LoaderCircle, Mail, Moon, Save, Send, ShieldCheck, Smartphone, Sun, Trash2 } from 'lucide-react'
 import { api } from '../api/client'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { useTheme } from '../hooks/useTheme'
@@ -15,11 +15,11 @@ const themeOptions: { value: ThemePreference; label: string; icon: typeof Sun }[
 ]
 
 const emailProviderOptions: Array<{ value: EmailProvider; label: string; description: string }> = [
-  { value: 'qq', label: 'QQ 邮箱', description: '使用 QQ 邮箱设置中的 SMTP 授权码。' },
-  { value: '163', label: '163 邮箱', description: '使用 163 邮箱设置中的客户端授权码。' },
-  { value: 'gmail', label: 'Gmail', description: '开启二步验证后使用应用专用密码。' },
-  { value: 'outlook', label: 'Outlook', description: '使用支持 SMTP 登录的 Outlook 邮箱。' },
-  { value: 'custom', label: '自定义 SMTP', description: '手工填写发件服务器及连接安全方式。' }
+  { value: 'qq', label: 'QQ 邮箱', description: '在 QQ 邮箱官方设置中开启 SMTP 后，可免费生成授权码。' },
+  { value: '163', label: '163 邮箱', description: '在 163 邮箱官方设置中开启 SMTP 后，可免费生成客户端授权码。' },
+  { value: 'gmail', label: 'Gmail', description: '开启二步验证后，可在 Google 账号中免费生成应用专用密码。' },
+  { value: 'outlook', label: 'Outlook', description: '使用 Outlook 官方提供的 SMTP 登录凭据，是否提供应用密码取决于账号设置。' },
+  { value: 'custom', label: '自定义 SMTP', description: '手工填写邮箱服务商提供的发件服务器和登录凭据。' }
 ]
 
 const emailProviderPresets: Record<Exclude<EmailProvider, 'custom'>, { host: string; port: number; security: EmailSecurity }> = {
@@ -27,6 +27,69 @@ const emailProviderPresets: Record<Exclude<EmailProvider, 'custom'>, { host: str
   '163': { host: 'smtp.163.com', port: 465, security: 'tls' },
   gmail: { host: 'smtp.gmail.com', port: 465, security: 'tls' },
   outlook: { host: 'smtp.office365.com', port: 587, security: 'starttls' }
+}
+
+interface EmailProviderGuide {
+  title: string
+  steps: string[]
+  settingsUrl?: string
+  settingsLabel?: string
+  note?: string
+}
+
+// 授权码必须由用户在邮箱官方页面完成身份验证后生成，因此这里只提供直达入口和逐步指引。
+const emailProviderGuides: Record<EmailProvider, EmailProviderGuide> = {
+  qq: {
+    title: 'QQ 邮箱免费获取授权码',
+    steps: [
+      '点击下方按钮并登录发件 QQ 邮箱。',
+      '进入“账号与安全”，找到 SMTP/IMAP 服务并开启。',
+      '按页面提示完成验证，生成授权码后复制到本页。'
+    ],
+    settingsUrl: 'https://wx.mail.qq.com/account',
+    settingsLabel: '打开 QQ 邮箱官方设置'
+  },
+  '163': {
+    title: '163 邮箱免费获取客户端授权码',
+    steps: [
+      '点击下方按钮并登录发件 163 邮箱。',
+      '打开“设置”，进入“POP3/SMTP/IMAP”。',
+      '开启 SMTP 服务并新增授权密码，复制到本页。'
+    ],
+    settingsUrl: 'https://mail.163.com/',
+    settingsLabel: '打开 163 邮箱官方设置'
+  },
+  gmail: {
+    title: 'Gmail 免费获取应用专用密码',
+    steps: [
+      '先在 Google 账号中开启两步验证。',
+      '点击下方按钮进入“应用专用密码”，按提示新建一个密码。',
+      '将生成的 16 位密码复制到本页，粘贴时可省略空格。'
+    ],
+    settingsUrl: 'https://myaccount.google.com/apppasswords',
+    settingsLabel: '打开 Google 官方设置',
+    note: '部分单位或学校账号是否显示此入口，由该账号的管理员策略决定。'
+  },
+  outlook: {
+    title: 'Outlook 获取应用密码',
+    steps: [
+      '点击下方按钮登录 Microsoft 账号安全页面。',
+      '开启两步验证，再进入“应用密码”。',
+      '创建新的应用密码并复制到本页。'
+    ],
+    settingsUrl: 'https://support.microsoft.com/account-billing/how-to-get-and-use-app-passwords-5896ed9b-4263-e681-128a-a6f2979a7944',
+    settingsLabel: '查看 Microsoft 官方获取方法',
+    note: '是否显示应用密码取决于个人账号类型、组织策略和 SMTP 登录设置。'
+  },
+  custom: {
+    title: '自定义邮箱服务商配置方法',
+    steps: [
+      '打开邮箱服务商的官方帮助中心，搜索“SMTP”或“应用密码/客户端授权码”。',
+      '确认官方提供的服务器地址、端口和连接安全方式。',
+      '完成官方身份验证后，将生成的凭据复制到本页。'
+    ],
+    note: '请只使用邮箱服务商的官方网站和帮助文档，不要在第三方页面输入邮箱密码。'
+  }
 }
 
 interface EmailFormState extends Omit<EmailSettings, 'recipients'> {
@@ -166,11 +229,12 @@ function EmailSettingsSection() {
   }
 
   const operationPending = saveMutation.isPending || testMutation.isPending || clearMutation.isPending
+  const providerGuide = form ? emailProviderGuides[form.provider] : null
 
   return (
     <section className="settings-section" aria-labelledby="email-title">
       <div className="settings-heading"><span className="settings-icon"><Mail aria-hidden="true" /></span><div><h2 id="email-title">邮件提醒</h2><p>告警和恢复事件可同时发送到一个或多个邮箱。</p></div></div>
-      <div className="email-free-note"><strong>无需额外付费接口</strong><span>可直接使用 QQ、163、Gmail 或 Outlook 邮箱自带的 SMTP 发信功能。</span></div>
+      <div className="email-free-note"><strong>邮件提醒免费，不需要购买 API</strong><span>直接使用 QQ、163、Gmail 或 Outlook 邮箱自带的 SMTP 发信功能；授权码由邮箱官方免费生成，仅用于登录发件邮箱，不是充值码或付费密钥。</span></div>
 
       {emailQuery.isPending ? <div className="email-settings-state"><LoaderCircle className="spin" aria-hidden="true" size={20} /><span>正在读取邮件设置</span></div> : null}
       {emailQuery.isError ? <div className="email-settings-state error"><span>{emailQuery.error.message}</span><button className="button secondary" type="button" onClick={() => void emailQuery.refetch()}>重新读取</button></div> : null}
@@ -182,10 +246,12 @@ function EmailSettingsSection() {
           <label className="field"><span>邮箱服务商</span><select value={form.provider} onChange={(event) => changeProvider(event.target.value as EmailProvider)}>{emailProviderOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>{emailProviderOptions.find((option) => option.value === form.provider)?.description}</small></label>
           <label className="field"><span>发件邮箱账号</span><input type="email" inputMode="email" autoComplete="email" value={form.username} onChange={(event) => changeUsername(event.target.value)} placeholder="name@example.com" /></label>
 
+          {providerGuide ? <div className="email-provider-guide span-2" aria-live="polite"><div><strong>{providerGuide.title}</strong><ol>{providerGuide.steps.map((step) => <li key={step}>{step}</li>)}</ol>{providerGuide.note ? <p>{providerGuide.note}</p> : null}</div>{providerGuide.settingsUrl ? <a className="button secondary" href={providerGuide.settingsUrl} target="_blank" rel="noopener noreferrer"><ExternalLink aria-hidden="true" size={18} />{providerGuide.settingsLabel}</a> : null}</div> : null}
+
           <label className="field"><span>SMTP 服务器</span><input value={form.host} readOnly={form.provider !== 'custom'} onChange={(event) => { setValidationError(''); setForm({ ...form, host: event.target.value, password: event.target.value === form.host ? form.password : '' }) }} placeholder="smtp.example.com" /></label>
           <label className="field"><span>SMTP 端口</span><input type="number" min="1" max="65535" inputMode="numeric" value={form.port} readOnly={form.provider !== 'custom'} onChange={(event) => { const port = Number(event.target.value); setValidationError(''); setForm({ ...form, port, password: port === form.port ? form.password : '' }) }} /></label>
           <label className="field"><span>连接安全</span><select value={form.security} disabled={form.provider !== 'custom'} onChange={(event) => { const security = event.target.value as EmailSecurity; setValidationError(''); setForm({ ...form, security, password: security === form.security ? form.password : '' }) }}><option value="tls">SSL/TLS</option><option value="starttls">STARTTLS</option></select></label>
-          <label className="field"><span>SMTP 授权码或应用密码 <em>{passwordReusable ? '已配置，认证身份未变时可留空沿用' : form.passwordConfigured ? '认证身份已变更，请重新填写' : '首次配置必填'}</em></span><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => { setValidationError(''); setForm({ ...form, password: event.target.value }) }} placeholder={passwordReusable ? '留空表示保持现有授权码' : '请输入新的授权码或应用密码'} /><small>更换服务商、服务器、端口、连接安全或发件账号后，需要重新填写。</small></label>
+          <label className="field"><span>SMTP 授权码或应用密码（官方免费生成） <em>{passwordReusable ? '已配置，认证身份未变时可留空沿用' : form.passwordConfigured ? '认证身份已变更，请重新填写' : '首次配置必填'}</em></span><input type="password" autoComplete="new-password" value={form.password} onChange={(event) => { setValidationError(''); setForm({ ...form, password: event.target.value }) }} placeholder={passwordReusable ? '留空表示保持现有授权码' : '请输入邮箱官方生成的授权码'} /><small>它不是付费 API Key，也不是充值码。请在发件邮箱的官方设置中开启 SMTP 并免费生成，系统只用它登录该邮箱发送提醒；更换服务商、服务器、端口、连接安全或发件账号后需要重新填写。</small></label>
 
           <label className="field"><span>发件人名称 <em>可选</em></span><input value={form.fromName} onChange={(event) => { setValidationError(''); setForm({ ...form, fromName: event.target.value }) }} placeholder="号池监控" /></label>
           <label className="field"><span>发件邮箱地址</span><input type="email" inputMode="email" autoComplete="email" value={form.fromAddress} onChange={(event) => { setValidationError(''); setForm({ ...form, fromAddress: event.target.value }) }} placeholder="name@example.com" /></label>

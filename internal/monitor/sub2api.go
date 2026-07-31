@@ -40,13 +40,11 @@ func (adapter *sub2APIAdapter) Check(ctx context.Context, target TargetConfig) (
 	me, err := adapter.readCurrentUser(ctx, session, target, token.accessToken)
 	if err != nil && IsAuthFailure(err) {
 		// 只有明确的认证失败才刷新或重新登录，网络错误由 Registry 统一重试。
-		if token.refreshToken != "" {
-			token, err = adapter.refresh(ctx, session, target, token.refreshToken)
-		} else if target.Credential.Email != "" && target.Credential.Password != "" {
-			token, err = adapter.login(ctx, session, target)
-		}
-		if err == nil {
-			me, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
+		if token.refreshToken != "" || sub2APIUsesPassword(target.Credential) {
+			token, err = adapter.renewToken(ctx, session, target, token.refreshToken)
+			if err == nil {
+				me, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
+			}
 		}
 	}
 	if err != nil {
@@ -107,7 +105,7 @@ func (adapter *sub2APIAdapter) resolveToken(ctx context.Context, session *reques
 			return cached, nil
 		}
 		if cached.refreshToken != "" {
-			return adapter.refresh(ctx, session, target, cached.refreshToken)
+			return adapter.renewToken(ctx, session, target, cached.refreshToken)
 		}
 	}
 	credential := target.Credential
@@ -115,9 +113,28 @@ func (adapter *sub2APIAdapter) resolveToken(ctx context.Context, session *reques
 		return sub2APIToken{accessToken: strings.TrimSpace(credential.AccessToken), refreshToken: strings.TrimSpace(credential.RefreshToken)}, nil
 	}
 	if strings.TrimSpace(credential.RefreshToken) != "" {
-		return adapter.refresh(ctx, session, target, credential.RefreshToken)
+		return adapter.renewToken(ctx, session, target, credential.RefreshToken)
 	}
 	return adapter.login(ctx, session, target)
+}
+
+// renewToken 优先续期令牌；密码登录渠道的刷新令牌失效时自动重新登录。
+func (adapter *sub2APIAdapter) renewToken(ctx context.Context, session *requestSession, target TargetConfig, refreshToken string) (sub2APIToken, error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken != "" {
+		token, err := adapter.refresh(ctx, session, target, refreshToken)
+		if err == nil {
+			return token, nil
+		}
+		if !IsAuthFailure(err) || !sub2APIUsesPassword(target.Credential) {
+			return sub2APIToken{}, err
+		}
+	}
+	return adapter.login(ctx, session, target)
+}
+
+func sub2APIUsesPassword(credential Credential) bool {
+	return strings.TrimSpace(credential.Email) != "" && credential.Password != ""
 }
 
 func (adapter *sub2APIAdapter) login(ctx context.Context, session *requestSession, target TargetConfig) (sub2APIToken, error) {

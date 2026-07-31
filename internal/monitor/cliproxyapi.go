@@ -15,6 +15,8 @@ type cliProxyAPIAdapter struct {
 	quotaRequestTimeout time.Duration
 }
 
+const cliProxyAPIParameterWarningStatusText = "参数警告，账号仍可用"
+
 func newCLIProxyAPIAdapter(client *secureHTTPClient) *cliProxyAPIAdapter {
 	return &cliProxyAPIAdapter{
 		http: client, quotaRequestTimeout: cliProxyAPIQuotaAccountTimeout,
@@ -59,6 +61,7 @@ func (adapter *cliProxyAPIAdapter) Check(ctx context.Context, target TargetConfi
 		TargetStatusError:    0,
 		TargetStatusDisabled: 0,
 	}
+	var availableAccounts int64
 	for _, account := range accounts {
 		status := TargetStatus(account.Status)
 		if status == TargetStatusUnknown {
@@ -66,21 +69,30 @@ func (adapter *cliProxyAPIAdapter) Check(ctx context.Context, target TargetConfi
 			status = TargetStatusError
 		}
 		counts[status]++
+		if cliProxyAPIAccountIsAvailable(account) {
+			availableAccounts++
+		}
 	}
 	snapshot := newSnapshot(target)
 	snapshot.Accounts = accounts
 	snapshot.Metrics = append(snapshot.Metrics,
+		metricWithThreshold(target, MetricHealthyAccounts, "可用账号", decimal.NewFromInt(availableAccounts), "个"),
 		metricWithThreshold(target, MetricAccountTotal, "账号总数", decimal.NewFromInt(int64(len(accounts))), "个"),
-		metricWithThreshold(target, MetricHealthyAccounts, "可用账号", decimal.NewFromInt(counts[TargetStatusHealthy]), "个"),
 		metricWithThreshold(target, MetricLimitedAccounts, "警告账号", decimal.NewFromInt(counts[TargetStatusWarning]), "个"),
 		metricWithThreshold(target, MetricErrorAccounts, "异常账号", decimal.NewFromInt(counts[TargetStatusError]), "个"),
 		metricWithThreshold(target, MetricDisabledAccounts, "禁用账号", decimal.NewFromInt(counts[TargetStatusDisabled]), "个"),
 	)
-	if len(accounts) == 0 || counts[TargetStatusHealthy] == 0 {
+	if len(accounts) == 0 || availableAccounts == 0 {
 		snapshot.Status = TargetStatusWarning
 		snapshot.Message = "CLIProxyAPI 当前没有可用账号"
 	}
 	return snapshot, nil
+}
+
+// cliProxyAPIAccountIsAvailable 将参数兼容警告保留在警告分类中，同时计入仍可调用的账号。
+func cliProxyAPIAccountIsAvailable(account AccountStatus) bool {
+	status := TargetStatus(account.Status)
+	return status == TargetStatusHealthy || (status == TargetStatusWarning && account.StatusText == cliProxyAPIParameterWarningStatusText)
 }
 
 // RefreshAccountQuotas 仅刷新前端当前页指定账号的额度，不修改账号健康状态。
@@ -212,7 +224,7 @@ func classifyCLIProxyAPIAccount(account map[string]any, now time.Time) (TargetSt
 		return TargetStatusError, "凭据失效", recoveryAt
 	}
 	if cliProxyAPIAccountParameterWarning(reason, statusCode) {
-		return TargetStatusWarning, "参数警告，账号仍可用", recoveryAt
+		return TargetStatusWarning, cliProxyAPIParameterWarningStatusText, recoveryAt
 	}
 	if cliProxyAPIAccountTransientHTTPWarning(statusCode) {
 		return TargetStatusWarning, "暂时不可用", recoveryAt

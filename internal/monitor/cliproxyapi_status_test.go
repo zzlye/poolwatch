@@ -157,13 +157,17 @@ func TestCLIProxyAPI账号错误按可用性分类(t *testing.T) {
 	}
 }
 
-func TestCLIProxyAPI参数警告不计入异常账号(t *testing.T) {
+func TestCLIProxyAPI参数警告计入可用账号但不计入异常账号(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v0/management/auth-files", func(writer http.ResponseWriter, _ *http.Request) {
 		writeTestJSON(writer, map[string]any{"files": []any{
 			map[string]any{
 				"auth_index": "warning-account", "provider": "codex", "status": "error",
 				"status_message": `{"detail":"Unsupported parameter: max_tool_calls"}`,
+			},
+			map[string]any{
+				"auth_index": "limited-account", "provider": "codex", "status": "error",
+				"status_code": 429, "status_message": "too many requests",
 			},
 			map[string]any{
 				"auth_index": "dead-account", "provider": "codex", "status": "error", "status_message": "unauthorized",
@@ -184,10 +188,16 @@ func TestCLIProxyAPI参数警告不计入异常账号(t *testing.T) {
 	for _, metric := range snapshot.Metrics {
 		values[metric.Key] = metric.Value.String()
 	}
-	if values[MetricLimitedAccounts] != "1" || values[MetricErrorAccounts] != "1" {
-		t.Fatalf("警告与异常账号计数未分开：%#v", values)
+	if values[MetricHealthyAccounts] != "1" || values[MetricLimitedAccounts] != "2" || values[MetricErrorAccounts] != "1" {
+		t.Fatalf("参数警告、限流与异常账号计数不正确：%#v", values)
+	}
+	if len(snapshot.Metrics) == 0 || snapshot.Metrics[0].Key != MetricHealthyAccounts {
+		t.Fatalf("CLIProxyAPI 首项指标应为可用账号，实际为：%+v", snapshot.Metrics)
 	}
 	if snapshot.Accounts[0].Status != string(TargetStatusWarning) || snapshot.Accounts[0].StatusText != "参数警告，账号仍可用" {
 		t.Fatalf("参数错误账号未按警告展示：%#v", snapshot.Accounts[0])
+	}
+	if snapshot.Message != "" {
+		t.Fatalf("存在参数警告账号时不应提示没有可用账号：%s", snapshot.Message)
 	}
 }
