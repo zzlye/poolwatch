@@ -40,32 +40,39 @@ func (apiTestRunner) Run(_ context.Context, target monitor.TargetInput) (monitor
 	}, nil
 }
 
-func (apiTestRunner) RefreshAccountQuotas(_ context.Context, _ monitor.TargetInput, accountIDs []string) ([]monitor.AccountStatus, error) {
+func (apiTestRunner) RefreshAccountQuotas(_ context.Context, target monitor.TargetInput, accountIDs []string) (monitor.AccountQuotaRefreshResult, error) {
 	remaining := decimal.NewFromInt(72)
+	remainingValue, limitValue := decimal.NewFromInt(18), decimal.NewFromInt(25)
 	result := make([]monitor.AccountStatus, 0, len(accountIDs))
 	for _, accountID := range accountIDs {
 		switch accountID {
-		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-ready"):
+		case monitor.PublicAccountID(target.Kind, "api-ready"):
+			window := monitor.AccountQuotaWindow{Key: "code-5h", Label: "5 小时", RemainingPercent: &remaining}
+			if target.Kind == monitor.TargetKindSub2API {
+				window = monitor.AccountQuotaWindow{
+					Key: "daily-usd", Label: "每日额度", RemainingPercent: &remaining,
+					RemainingValue: &remainingValue, LimitValue: &limitValue, Unit: "USD",
+				}
+			}
 			result = append(result, monitor.AccountStatus{
 				ExternalID: "api-ready", Provider: "codex", Type: "plus", Status: string(monitor.TargetStatusError),
-				QuotaState:   monitor.AccountQuotaStateAvailable,
-				QuotaWindows: []monitor.AccountQuotaWindow{{Key: "code-5h", Label: "5 小时", RemainingPercent: &remaining}},
+				QuotaState: monitor.AccountQuotaStateAvailable, QuotaWindows: []monitor.AccountQuotaWindow{window},
 			})
-		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unavailable"):
+		case monitor.PublicAccountID(target.Kind, "api-unavailable"):
 			result = append(result, monitor.AccountStatus{
 				ExternalID: "api-unavailable", Provider: "codex", Status: string(monitor.TargetStatusError),
 				QuotaState: monitor.AccountQuotaStateUnavailable,
 			})
-		case monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "api-unsupported"):
+		case monitor.PublicAccountID(target.Kind, "api-unsupported"):
 			result = append(result, monitor.AccountStatus{
 				ExternalID: "api-unsupported", Provider: "claude", Status: string(monitor.TargetStatusError),
 				QuotaState: monitor.AccountQuotaStateUnsupported,
 			})
 		default:
-			return nil, &monitor.CheckError{Kind: monitor.ErrorClassResponse, Message: "账号列表已经变化，请刷新页面后重试"}
+			return monitor.AccountQuotaRefreshResult{}, &monitor.CheckError{Kind: monitor.ErrorClassResponse, Message: "账号列表已经变化，请刷新页面后重试"}
 		}
 	}
-	return result, nil
+	return monitor.AccountQuotaRefreshResult{Accounts: result}, nil
 }
 
 func (runner apiTestRunner) Probe(ctx context.Context, target monitor.TargetInput) (monitor.Result, any, error) {
@@ -728,6 +735,70 @@ func TestCLIProxyAPITargetPersistsComparisonAndManagementKey(t *testing.T) {
 	}
 }
 
+func TestSub2APITargetReturnsAccountPoolAndRefreshesAbsoluteQuota(t *testing.T) {
+	testServer, database, vault := newAPITestServer(t)
+	defer testServer.Close()
+	defer database.Close()
+	client := testServer.Client()
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+	status, body := requestJSON(t, client, http.MethodPost, testServer.URL+"/api/setup", map[string]any{
+		"initializationToken": "setup-token", "username": "admin", "password": "long-password-123",
+	}, "")
+	if status != http.StatusCreated {
+		t.Fatalf("首次设置失败: %d %s", status, body)
+	}
+	draft := map[string]any{
+		"name": "Sub2API 号池", "kind": "sub2api", "baseUrl": "https://sub2.example.com", "topupUrl": "",
+		"enabled": true, "checkIntervalMinutes": 5, "email": "user@example.com", "password": "password-123",
+		"credentialMode": "password", "adminKey": "sub2-admin-secret",
+		"thresholds": []map[string]any{{
+			"key": "wallet_balance", "label": "钱包余额", "value": "5", "unit": "USD",
+		}},
+	}
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets", draft, "")
+	if status != http.StatusCreated || strings.Contains(body, "sub2-admin-secret") {
+		t.Fatalf("创建 Sub2API 号池失败或响应泄漏管理密钥: %d %s", status, body)
+	}
+	var created targetResponse
+	if err := json.Unmarshal([]byte(body), &created); err != nil || created.Kind != string(monitor.TargetKindSub2API) {
+		t.Fatalf("Sub2API 渠道响应不正确：%#v, %v", created, err)
+	}
+	publicID := monitor.PublicAccountID(monitor.TargetKindSub2API, "api-ready")
+	if err := database.ReplaceChatAccounts(context.Background(), created.ID, []store.ChatAccount{{
+		TargetID: created.ID, ExternalID: publicID, DisplayName: "主账号", Provider: "openai", Type: "plus",
+		Status: string(monitor.TargetStatusHealthy), StatusText: "可用",
+	}}); err != nil {
+		t.Fatalf("保存 Sub2API 接口测试账号失败: %v", err)
+	}
+	status, body = requestJSON(t, client, http.MethodGet, testServer.URL+"/api/targets/"+created.ID, nil, "")
+	if status != http.StatusOK || !strings.Contains(body, publicID) || strings.Contains(body, "api-ready") {
+		t.Fatalf("Sub2API 渠道详情未返回脱敏账号池: %d %s", status, body)
+	}
+	status, body = requestJSON(t, client, http.MethodPost, testServer.URL+"/api/targets/"+created.ID+"/accounts/quota/refresh", map[string]any{
+		"accountIds": []string{publicID},
+	}, "")
+	if status != http.StatusOK || strings.Contains(body, "api-ready") {
+		t.Fatalf("刷新 Sub2API 账号额度失败或泄漏上游标识: %d %s", status, body)
+	}
+	var refreshed accountQuotaRefreshResponse
+	if err := json.Unmarshal([]byte(body), &refreshed); err != nil || refreshed.RefreshedCount != 1 ||
+		len(refreshed.Accounts) != 1 || len(refreshed.Accounts[0].QuotaWindows) != 1 ||
+		refreshed.Accounts[0].QuotaWindows[0].RemainingValue != "18" ||
+		refreshed.Accounts[0].QuotaWindows[0].LimitValue != "25" ||
+		refreshed.Accounts[0].QuotaWindows[0].Unit != "USD" {
+		t.Fatalf("Sub2API 额度刷新响应不完整：%#v, %v", refreshed, err)
+	}
+	stored, err := database.TargetByID(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("读取 Sub2API 渠道失败: %v", err)
+	}
+	decoded, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(decoded), "sub2-admin-secret") || strings.Contains(body, "sub2-admin-secret") {
+		t.Fatalf("Sub2API 管理密钥没有仅加密保存: %v", err)
+	}
+}
+
 func TestCLIProxyAPIAccountResponseOmitsImageQuota(t *testing.T) {
 	account := store.ChatAccount{
 		ExternalID: "hashed-account", Provider: "codex", Type: "oauth", Status: string(monitor.TargetStatusHealthy), Quota: 77,
@@ -760,6 +831,108 @@ func TestCLIProxyAPIAccountResponseOmitsImageQuota(t *testing.T) {
 	if strings.Contains(string(chatPayload), "quotaState") || strings.Contains(string(chatPayload), "quotaWindows") ||
 		strings.Contains(string(chatPayload), "subscriptionExpiresAt") {
 		t.Fatalf("chatgpt2api 账号响应不应包含 CLIProxyAPI 额度字段：%s", chatPayload)
+	}
+
+	sub2Account := account
+	sub2Account.QuotaWindows[0].RemainingValue = "18"
+	sub2Account.QuotaWindows[0].LimitValue = "25"
+	sub2Account.QuotaWindows[0].Unit = "USD"
+	sub2Response := mapAccountResponse(string(monitor.TargetKindSub2API), sub2Account)
+	sub2Payload, err := json.Marshal(sub2Response)
+	if err != nil {
+		t.Fatalf("序列化 Sub2API 账号响应失败: %v", err)
+	}
+	if strings.Contains(string(sub2Payload), "imageQuota") || len(sub2Response.QuotaWindows) != 1 ||
+		sub2Response.QuotaWindows[0].RemainingValue != "18" || sub2Response.QuotaWindows[0].LimitValue != "25" ||
+		sub2Response.QuotaWindows[0].Unit != "USD" {
+		t.Fatalf("Sub2API 账号额度响应不完整或包含无关字段：%s", sub2Payload)
+	}
+}
+
+func TestSub2APIBrowserImportPreservesAdminKey(t *testing.T) {
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("创建测试保险箱失败: %v", err)
+	}
+	authAttempts := newTargetAuthAttemptStore(vault)
+	server := &Server{dependencies: Dependencies{Vault: vault}, targetAuth: authAttempts}
+	baseURL := "https://sub2.example.com"
+	attempt, err := authAttempts.create(42, monitor.TargetKindSub2API, baseURL, baseURL+"/login")
+	if err != nil {
+		t.Fatalf("创建 Sub2API 网页登录任务失败: %v", err)
+	}
+	_, captureToken, err := authAttempts.native(attempt.ID)
+	if err != nil {
+		t.Fatalf("读取 Sub2API 网页登录票据失败: %v", err)
+	}
+	if _, err := authAttempts.markReady(attempt.ID, captureToken, monitor.Credential{
+		AccessToken: "browser-access", RefreshToken: "browser-refresh",
+	}); err != nil {
+		t.Fatalf("保存 Sub2API 网页登录凭据失败: %v", err)
+	}
+	existingJSON, _ := json.Marshal(monitor.Credential{
+		Email: "old@example.com", Password: "old-password", AdminKey: "existing-admin-key",
+	})
+	existingEncrypted, err := vault.Encrypt(existingJSON)
+	if err != nil {
+		t.Fatalf("加密原 Sub2API 凭据失败: %v", err)
+	}
+	existing := &store.Target{
+		Kind: string(monitor.TargetKindSub2API), BaseURL: baseURL,
+		ConfigJSON: `{"credential_mode":"password"}`, CredentialsEnc: existingEncrypted,
+	}
+	ctx := context.WithValue(context.Background(), adminContextKey, store.Admin{ID: 42})
+	credential, mode, err := server.mergeCredential(ctx, targetDraft{
+		CredentialMode: credentialModeSub2APIBrowserOAuth, BrowserAuthAttemptID: attempt.ID,
+	}, existing, monitor.TargetKindSub2API, baseURL)
+	if err != nil {
+		t.Fatalf("合并 Sub2API 网页登录凭据失败: %v", err)
+	}
+	if mode != credentialModeSub2APIBrowserOAuth || credential.AccessToken != "browser-access" ||
+		credential.RefreshToken != "browser-refresh" || credential.AdminKey != "existing-admin-key" {
+		t.Fatalf("切换网页登录后丢失 Sub2API 管理密钥：%#v", credential)
+	}
+}
+
+func TestSub2APIChangingOriginDoesNotReuseAdminKey(t *testing.T) {
+	vault, err := secure.NewVault([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("创建测试保险箱失败: %v", err)
+	}
+	server := &Server{dependencies: Dependencies{Vault: vault}}
+	existingJSON, _ := json.Marshal(monitor.Credential{
+		Email: "old@example.com", Password: "old-password", AdminKey: "old-origin-admin-key",
+	})
+	existingEncrypted, err := vault.Encrypt(existingJSON)
+	if err != nil {
+		t.Fatalf("加密原 Sub2API 凭据失败: %v", err)
+	}
+	existing := &store.Target{
+		Kind: string(monitor.TargetKindSub2API), BaseURL: "https://old.example.com",
+		ConfigJSON: `{"credential_mode":"password"}`, CredentialsEnc: existingEncrypted,
+	}
+	credential, mode, err := server.mergeCredential(context.Background(), targetDraft{
+		CredentialMode: credentialModeSub2APIPassword,
+		Email:          "new@example.com",
+		Password:       "new-password",
+	}, existing, monitor.TargetKindSub2API, "https://new.example.com")
+	if err != nil {
+		t.Fatalf("更换 Sub2API 来源后合并新凭据失败: %v", err)
+	}
+	if mode != credentialModeSub2APIPassword || credential.AdminKey != "" {
+		t.Fatalf("更换站点来源后不应复用旧管理员密钥：%#v", credential)
+	}
+}
+
+func TestSub2APICredentialAcceptsOptionalAdminKey(t *testing.T) {
+	credential, err := mergeSub2APICredential(monitor.Credential{}, targetDraft{
+		Email: "user@example.com", Password: "password", AdminKey: "sub2-admin-key",
+	}, credentialModeSub2APIPassword)
+	if err != nil {
+		t.Fatalf("合并 Sub2API 密码凭据失败: %v", err)
+	}
+	if credential.AdminKey != "sub2-admin-key" {
+		t.Fatalf("Sub2API 可选管理密钥没有进入连接配置：%#v", credential)
 	}
 }
 

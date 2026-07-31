@@ -16,6 +16,8 @@ import (
 
 const (
 	cliProxyAPICodexUsageURL                = "https://chatgpt.com/backend-api/wham/usage"
+	cliProxyAPIClaudeUsageURL               = "https://api.anthropic.com/api/oauth/usage"
+	cliProxyAPIClaudeProfileURL             = "https://api.anthropic.com/api/oauth/profile"
 	cliProxyAPIGeminiLoadAssistURL          = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	cliProxyAPIGeminiQuotaURL               = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	cliProxyAPIAntigravitySummaryURL        = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
@@ -98,7 +100,7 @@ func prepareCLIProxyAPIQuotaAccount(account *AccountStatus, raw map[string]any, 
 	if len(account.QuotaWindows) > 0 {
 		account.QuotaState = AccountQuotaStateAvailable
 	}
-	if !cliProxyAPIProviderHasQuotaEndpoint(normalizeCLIProxyAPIProvider(account.Provider)) {
+	if !cliProxyAPIAccountHasQuotaEndpoint(normalizeCLIProxyAPIProvider(account.Provider), raw) {
 		if account.QuotaState == "" {
 			account.QuotaState = AccountQuotaStateUnsupported
 		}
@@ -140,6 +142,8 @@ func (adapter *cliProxyAPIAdapter) queryCLIProxyAPIQuota(
 	switch provider {
 	case "codex":
 		return adapter.queryCLIProxyAPICodexQuota(ctx, session, target, managementKey, raw)
+	case "claude":
+		return adapter.queryCLIProxyAPIClaudeQuota(ctx, session, target, managementKey, raw)
 	case "gemini-cli":
 		return adapter.queryCLIProxyAPIGeminiQuota(ctx, session, target, managementKey, raw)
 	case "antigravity":
@@ -167,6 +171,8 @@ func normalizeCLIProxyAPIProvider(value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	normalized = strings.ReplaceAll(normalized, "_", "-")
 	switch normalized {
+	case "anthropic", "claude-code", "claude":
+		return "claude"
 	case "gemini", "gemini-cli", "geminicli":
 		return "gemini-cli"
 	case "anti-gravity", "antigravity":
@@ -179,7 +185,25 @@ func normalizeCLIProxyAPIProvider(value string) string {
 }
 
 func cliProxyAPIProviderHasQuotaEndpoint(provider string) bool {
-	return provider == "codex" || provider == "gemini-cli" || provider == "antigravity"
+	return provider == "codex" || provider == "claude" || provider == "gemini-cli" || provider == "antigravity"
+}
+
+// cliProxyAPIAccountHasQuotaEndpoint 避免把没有订阅窗口的 Claude API Key 误标为可刷新。
+func cliProxyAPIAccountHasQuotaEndpoint(provider string, raw map[string]any) bool {
+	if !cliProxyAPIProviderHasQuotaEndpoint(provider) {
+		return false
+	}
+	if provider != "claude" {
+		return true
+	}
+	accountType := strings.ToLower(strings.TrimSpace(stringField(raw, "account_type", "accountType", "auth_type", "authType")))
+	switch strings.NewReplacer("-", "", "_", "", " ", "").Replace(accountType) {
+	case "apikey", "key":
+		return false
+	default:
+		// 旧版管理接口没有 account_type；其中的 Claude auth-file 均为 OAuth，继续兼容读取。
+		return true
+	}
 }
 
 func (adapter *cliProxyAPIAdapter) queryCLIProxyAPICodexQuota(
@@ -212,6 +236,176 @@ func (adapter *cliProxyAPIAdapter) queryCLIProxyAPICodexQuota(
 		Windows:  parseCLIProxyAPICodexQuotaWindows(payload, time.Now().UTC()),
 		PlanType: safeCLIProxyAPIIdentifier(stringField(payload, "plan_type", "planType"), 80),
 	}, true
+}
+
+// queryCLIProxyAPIClaudeQuota 通过 CPA 管理代理读取单个 Claude OAuth 凭证的真实用量窗口。
+func (adapter *cliProxyAPIAdapter) queryCLIProxyAPIClaudeQuota(
+	ctx context.Context,
+	session *requestSession,
+	target TargetConfig,
+	managementKey string,
+	raw map[string]any,
+) (cliProxyAPIQuotaResult, bool) {
+	authIndex := strings.TrimSpace(stringField(raw, "auth_index", "authIndex"))
+	if authIndex == "" {
+		return cliProxyAPIQuotaResult{}, false
+	}
+	headers := map[string]string{
+		"Authorization":  "Bearer $TOKEN$",
+		"Content-Type":   "application/json",
+		"anthropic-beta": "oauth-2025-04-20",
+	}
+	payload, ok := adapter.cliProxyAPIManagementCall(ctx, session, target, managementKey, map[string]any{
+		"auth_index": authIndex,
+		"method":     http.MethodGet,
+		"url":        cliProxyAPIClaudeUsageURL,
+		"header":     headers,
+	})
+	if !ok {
+		return cliProxyAPIQuotaResult{}, false
+	}
+	result := cliProxyAPIQuotaResult{Windows: parseCLIProxyAPIClaudeQuotaWindows(payload)}
+	// 套餐查询只是展示增强；失败时仍保留已经读取到的真实额度。
+	if profile, profileOK := adapter.cliProxyAPIManagementCall(ctx, session, target, managementKey, map[string]any{
+		"auth_index": authIndex,
+		"method":     http.MethodGet,
+		"url":        cliProxyAPIClaudeProfileURL,
+		"header":     headers,
+	}); profileOK {
+		result.PlanType = parseCLIProxyAPIClaudePlanType(profile)
+	}
+	return result, true
+}
+
+// parseCLIProxyAPIClaudeQuotaWindows 将上游已用百分比转换为页面统一使用的剩余百分比。
+func parseCLIProxyAPIClaudeQuotaWindows(payload map[string]any) []AccountQuotaWindow {
+	fableLimit, hasFableLimit := parseCLIProxyAPIClaudeFableLimit(payload)
+	definitions := []struct {
+		field string
+		key   string
+		label string
+	}{
+		{field: "five_hour", key: "claude-5h", label: "5 小时"},
+		{field: "seven_day", key: "claude-7d", label: "7 天"},
+		{field: "seven_day_oauth_apps", key: "claude-7d-oauth", label: "7 天 OAuth 应用"},
+		{field: "seven_day_opus", key: "claude-7d-opus", label: "7 天 Opus"},
+		{field: "seven_day_sonnet", key: "claude-7d-sonnet", label: "7 天 Sonnet"},
+		{field: "seven_day_cowork", key: "claude-7d-cowork", label: "7 天 Cowork"},
+		{field: "iguana_necktie", key: "claude-7d-fable", label: "7 天 Fable"},
+	}
+	result := make([]AccountQuotaWindow, 0, len(definitions))
+	for _, definition := range definitions {
+		// 新版 limits 中的有效 Fable 周额度优先于兼容旧服务端的 iguana_necktie 字段。
+		if definition.field == "iguana_necktie" && hasFableLimit {
+			continue
+		}
+		window := mapField(payload, definition.field)
+		if window == nil {
+			continue
+		}
+		remaining := cliProxyAPIRemainingFromUsedPercent(firstNonNil(window["utilization"], window["used_percent"], window["usedPercent"]))
+		resetAt := parseCLIProxyAPITime(firstNonNil(window["resets_at"], window["resetsAt"], window["reset_at"], window["resetAt"]))
+		if remaining == nil && resetAt == "" {
+			continue
+		}
+		result = append(result, AccountQuotaWindow{
+			Key: definition.key, Label: definition.label, RemainingPercent: remaining, ResetAt: resetAt,
+		})
+	}
+	if hasFableLimit {
+		result = append(result, fableLimit)
+	}
+	if extraUsage, ok := parseCLIProxyAPIClaudeExtraUsage(payload); ok {
+		result = append(result, extraUsage)
+	}
+	return mergeCLIProxyAPIQuotaWindows(nil, result)
+}
+
+// parseCLIProxyAPIClaudeExtraUsage 把上游以美分返回的额外用量换算为美元绝对值。
+func parseCLIProxyAPIClaudeExtraUsage(payload map[string]any) (AccountQuotaWindow, bool) {
+	extra := mapField(payload, "extra_usage", "extraUsage")
+	enabled, enabledOK := flexibleBool(firstNonNil(extra["is_enabled"], extra["isEnabled"]))
+	if extra == nil || (enabledOK && !enabled) {
+		return AccountQuotaWindow{}, false
+	}
+	limitCents, limitOK := decimalFromAny(firstNonNil(extra["monthly_limit"], extra["monthlyLimit"]))
+	usedCents, usedOK := decimalFromAny(firstNonNil(extra["used_credits"], extra["usedCredits"]))
+	if !limitOK || !usedOK || !limitCents.IsPositive() || usedCents.IsNegative() {
+		return AccountQuotaWindow{}, false
+	}
+	remainingCents := limitCents.Sub(usedCents)
+	if remainingCents.IsNegative() {
+		remainingCents = decimal.Zero
+	}
+	remainingValue := remainingCents.Div(decimal.NewFromInt(100))
+	limitValue := limitCents.Div(decimal.NewFromInt(100))
+	remainingPercent := remainingCents.Div(limitCents).Mul(decimal.NewFromInt(100))
+	remainingPercent = *clampCLIProxyAPIPercent(remainingPercent)
+	return AccountQuotaWindow{
+		Key: "claude-extra-usage", Label: "额外用量", RemainingPercent: &remainingPercent,
+		RemainingValue: &remainingValue, LimitValue: &limitValue, Unit: "USD",
+	}, true
+}
+
+// parseCLIProxyAPIClaudeFableLimit 兼容新版 limits 数组中的 Fable 周额度。
+func parseCLIProxyAPIClaudeFableLimit(payload map[string]any) (AccountQuotaWindow, bool) {
+	limits, _ := payload["limits"].([]any)
+	var fallback map[string]any
+	var fallbackRemaining *decimal.Decimal
+	for _, raw := range limits {
+		limit, ok := raw.(map[string]any)
+		if !ok || !strings.EqualFold(strings.TrimSpace(stringField(limit, "kind")), "weekly_scoped") {
+			continue
+		}
+		model := mapField(mapField(limit, "scope"), "model")
+		name := strings.ToLower(strings.TrimSpace(stringField(model, "display_name", "displayName")))
+		if name != "fable" && name != "fable 5" {
+			continue
+		}
+		remaining := cliProxyAPIRemainingFromUsedPercent(limit["percent"])
+		if remaining == nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = limit
+			fallbackRemaining = remaining
+		}
+		active, activeOK := flexibleBool(limit["is_active"])
+		if activeOK && active {
+			fallback = limit
+			fallbackRemaining = remaining
+			break
+		}
+	}
+	if fallback == nil {
+		return AccountQuotaWindow{}, false
+	}
+	resetAt := parseCLIProxyAPITime(firstNonNil(fallback["resets_at"], fallback["resetsAt"]))
+	return AccountQuotaWindow{
+		Key: "claude-7d-fable", Label: "7 天 Fable", RemainingPercent: fallbackRemaining, ResetAt: resetAt,
+	}, true
+}
+
+// parseCLIProxyAPIClaudePlanType 仅返回允许展示的套餐名称，不保留个人资料。
+func parseCLIProxyAPIClaudePlanType(profile map[string]any) string {
+	account := mapField(profile, "account")
+	if value, ok := flexibleBool(account["has_claude_max"]); ok && value {
+		return "max"
+	}
+	if value, ok := flexibleBool(account["has_claude_pro"]); ok && value {
+		return "pro"
+	}
+	organization := mapField(profile, "organization")
+	if strings.EqualFold(strings.TrimSpace(stringField(organization, "organization_type")), "claude_team") &&
+		strings.EqualFold(strings.TrimSpace(stringField(organization, "subscription_status")), "active") {
+		return "team"
+	}
+	maxValue, hasMax := flexibleBool(account["has_claude_max"])
+	proValue, hasPro := flexibleBool(account["has_claude_pro"])
+	if hasMax && hasPro && !maxValue && !proValue {
+		return "free"
+	}
+	return ""
 }
 
 func (adapter *cliProxyAPIAdapter) queryCLIProxyAPIGeminiQuota(
@@ -973,9 +1167,17 @@ func flexibleBool(value any) (bool, bool) {
 	case bool:
 		return typed, true
 	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		switch normalized {
+		case "yes", "y", "on":
+			return true, true
+		case "no", "n", "off":
+			return false, true
+		}
+		parsed, err := strconv.ParseBool(normalized)
 		return parsed, err == nil
 	default:
-		return false, false
+		parsed, ok := decimalFromAny(value)
+		return !parsed.IsZero(), ok
 	}
 }

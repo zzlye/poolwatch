@@ -16,6 +16,8 @@ export default defineConfig({
     cwd: process.cwd(),
     env: { VITE_USE_MOCKS: 'true', POOLWATCH_E2E_BUILD: 'true' },
     url: 'http://127.0.0.1:4173',
+    // Windows 首次完整构建可能超过一分钟，为端到端服务器预留稳定启动时间。
+    timeout: 180_000,
     reuseExistingServer: !process.env.CI
   }
 })

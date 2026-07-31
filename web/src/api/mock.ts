@@ -45,19 +45,20 @@ function makeMockCLIProxyAccounts(total: number): SanitizedAccount[] {
   // 同时覆盖额度已获取、暂未获取和提供商不支持三种状态，便于跨端验收。
   return Array.from({ length: total }, (_, index) => {
     const provider = providers[index % providers.length]
+    const type = types[index % types.length]
     const status = statuses[index % statuses.length]
-    const quotaState = provider === 'Anthropic' ? 'unsupported' : index % 5 === 2 ? 'unavailable' : 'available'
+    const quotaState = provider === 'Anthropic' && type === 'API Key' ? 'unsupported' : index % 5 === 2 ? 'unavailable' : 'available'
     return {
       id: `cli-account-${index + 1}`,
       displayName: `代理账号 ${index + 1}`,
       email: `proxy${String(index + 1).padStart(2, '0')}***@example.com`,
       provider,
-      type: types[index % types.length],
+      type,
       status,
       statusText: status === 'warning' ? '限流' : undefined,
       quotaState,
       quotaWindows: quotaState === 'available' ? [
-        { key: 'short', label: provider === 'Gemini' ? 'Gemini 2.5 Pro' : '5 小时额度', remainingPercent: String(Math.max(4, 96 - index * 4)), resetAt: new Date(now + (index + 1) * 30 * 60_000).toISOString() },
+        { key: 'short', label: provider === 'Gemini' ? 'Gemini 2.5 Pro' : provider === 'Anthropic' ? '5 小时' : '5 小时额度', remainingPercent: String(Math.max(4, 96 - index * 4)), resetAt: new Date(now + (index + 1) * 30 * 60_000).toISOString() },
         { key: 'weekly', label: '每周额度', remainingPercent: String(Math.max(8, 88 - index * 3)), resetAt: new Date(now + (index + 1) * 24 * 60 * 60_000).toISOString() },
         ...(index === 0 ? [{ key: 'review', label: '代码审查额度', remainingPercent: '67.5', resetAt: new Date(now + 2 * 24 * 60 * 60_000).toISOString() }] : [])
       ] : undefined,
@@ -65,6 +66,33 @@ function makeMockCLIProxyAccounts(total: number): SanitizedAccount[] {
       recoveryAt: status === 'warning' ? new Date(now + (index + 1) * 10 * 60_000).toISOString() : undefined,
       success: 100 + index * 7,
       fail: index % 5
+    }
+  })
+}
+
+function makeMockSub2APIAccounts(total: number): SanitizedAccount[] {
+  const statuses: TargetStatus[] = ['healthy', 'warning', 'error', 'disabled']
+  // 覆盖订阅被动额度、内部金额额度和不支持额度三类 Sub2API 账号。
+  return Array.from({ length: total }, (_, index) => {
+    const subscriptionAccount = index % 3 === 0
+    const internalBudgetAccount = index % 3 === 1
+    const status = statuses[index % statuses.length]
+    const quotaState = subscriptionAccount || internalBudgetAccount ? (index % 7 === 3 ? 'unavailable' : 'available') : 'unsupported'
+    return {
+      id: `sub2-account-${index + 1}`,
+      displayName: `上游账号 ${index + 1}`,
+      provider: subscriptionAccount || internalBudgetAccount ? 'Anthropic' : 'OpenAI',
+      type: subscriptionAccount ? (index % 2 === 0 ? 'OAuth' : 'Setup Token') : internalBudgetAccount ? (index % 2 === 0 ? 'API Key' : 'Bedrock') : 'OAuth',
+      status,
+      statusText: status === 'warning' ? '限流或冷却中' : undefined,
+      quotaState,
+      quotaWindows: quotaState !== 'available' ? undefined : subscriptionAccount ? [
+        { key: 'five-hour', label: '5 小时', remainingPercent: String(Math.max(5, 92 - index * 4)), resetAt: new Date(now + (index + 1) * 30 * 60_000).toISOString() },
+        { key: 'seven-day', label: '7 天', remainingPercent: String(Math.max(8, 86 - index * 3)), resetAt: new Date(now + 7 * 24 * 60 * 60_000).toISOString() }
+      ] : internalBudgetAccount ? [
+        { key: 'internal-daily', label: '内部日额度', remainingPercent: '75', remainingValue: String(15 + index), limitValue: String(20 + index), unit: 'USD', resetAt: new Date(now + 12 * 60 * 60_000).toISOString() }
+      ] : undefined,
+      recoveryAt: status === 'warning' ? new Date(now + (index + 1) * 10 * 60_000).toISOString() : undefined
     }
   })
 }
@@ -102,8 +130,11 @@ let targets: Target[] = [
     nextCheckAt: new Date(now + 3 * 60_000).toISOString(),
     authConfigured: true,
     metrics: [
-      { key: 'wallet_balance', label: '钱包余额', value: '18.20', unit: '元', threshold: '20', status: 'warning' }
-    ]
+      { key: 'wallet_balance', label: '钱包余额', value: '18.20', unit: '元', threshold: '20', status: 'warning' },
+      { key: 'healthy_accounts', label: '可用账号', value: '4', unit: '个', status: 'healthy' },
+      { key: 'account_total', label: '账号总数', value: '16', unit: '个', status: 'healthy' }
+    ],
+    accounts: makeMockSub2APIAccounts(16)
   },
   {
     id: 'chat-pool',

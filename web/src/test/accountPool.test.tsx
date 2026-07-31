@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { AccountPoolView } from '../components/AccountPoolView'
-import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
+import { CLIProxyAccountPoolView, QuotaAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import type { SanitizedAccount, TargetStatus } from '../types'
 
 const statusSequence: TargetStatus[] = ['healthy', 'warning', 'error', 'disabled']
@@ -133,7 +133,7 @@ describe('CLIProxyAPI 账号筛选与分页', () => {
     expect(onRefreshQuota).toHaveBeenLastCalledWith(accounts.slice(0, 10).map((account) => account.id))
   })
 
-  it('翻页和筛选后只自动刷新新页面实际显示的账号', async () => {
+  it('翻页自动刷新新页面，筛选变化等待用户手动刷新', async () => {
     const onRefreshQuota = vi.fn(async (accountIds: string[]) => ({
       accounts: accounts.filter((account) => accountIds.includes(account.id)),
       refreshedCount: accountIds.length,
@@ -148,11 +148,118 @@ describe('CLIProxyAPI 账号筛选与分页', () => {
     expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-11', 'cli-12'])
 
     fireEvent.change(screen.getByRole('combobox', { name: '提供商' }), { target: { value: 'openai' } })
-    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(3))
-    expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-1', 'cli-3', 'cli-5', 'cli-7', 'cli-9', 'cli-11'])
-
     fireEvent.change(screen.getByRole('combobox', { name: '账号状态' }), { target: { value: 'error' } })
-    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(4))
+
+    await new Promise((resolve) => window.setTimeout(resolve, 20))
+    expect(onRefreshQuota).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByRole('button', { name: '刷新本页额度' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(3))
     expect(onRefreshQuota).toHaveBeenLastCalledWith(['cli-3', 'cli-7', 'cli-11'])
+  })
+
+  it('相同页码切换到另一组筛选结果后仍刷新新页面账号', async () => {
+    const filteredAccounts: SanitizedAccount[] = Array.from({ length: 40 }, (_, index) => ({
+      id: `filtered-${index + 1}`,
+      displayName: `筛选账号 ${index + 1}`,
+      provider: index < 20 ? 'OpenAI' : 'Anthropic',
+      type: 'OAuth',
+      status: 'healthy'
+    }))
+    const onRefreshQuota = vi.fn(async (accountIds: string[]) => ({
+      accounts: filteredAccounts.filter((account) => accountIds.includes(account.id)),
+      refreshedCount: accountIds.length,
+      unavailableCount: 0,
+      unsupportedCount: 0
+    }))
+    render(<CLIProxyAccountPoolView accounts={filteredAccounts} onRefreshQuota={onRefreshQuota} />)
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByRole('combobox', { name: '提供商' }), { target: { value: 'openai' } })
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(2))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(filteredAccounts.slice(10, 20).map((account) => account.id))
+
+    fireEvent.change(screen.getByRole('combobox', { name: '提供商' }), { target: { value: 'anthropic' } })
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledTimes(3))
+    expect(onRefreshQuota).toHaveBeenLastCalledWith(filteredAccounts.slice(30, 40).map((account) => account.id))
+  })
+})
+
+describe('Sub2API 账号筛选与额度', () => {
+  const accounts: SanitizedAccount[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `sub2-${index + 1}`,
+    displayName: `订阅账号 ${index + 1}`,
+    email: `sub${String(index + 1).padStart(2, '0')}@example.com`,
+    provider: index % 2 === 0 ? 'OpenAI' : 'Anthropic',
+    type: index % 3 === 0 ? '共享' : '独享',
+    status: statusSequence[index % statusSequence.length],
+    success: 100 + index,
+    fail: index
+  }))
+
+  it('使用平台和类型独立筛选、分页并隐藏调用成功失败列', () => {
+    render(<QuotaAccountPoolView kind="sub2api" accounts={accounts} />)
+
+    expect(screen.getByRole('navigation', { name: 'Sub2API 账号分页' })).toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: '搜索 Sub2API 账号' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '平台' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '提供商' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '成功' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '失败' })).not.toBeInTheDocument()
+    expect(screen.getByText('显示第 1–10 条，共 12 条')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    expect(screen.getByText('订阅账号 12')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox', { name: '平台' }), { target: { value: 'anthropic' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '账号类型' }), { target: { value: '独享' } })
+    expect(screen.getByText(/共 4 条/)).toBeInTheDocument()
+    expect(screen.getByText('订阅账号 2')).toBeInTheDocument()
+    expect(screen.queryByText('订阅账号 1')).not.toBeInTheDocument()
+  })
+
+  it('实时数据移除已选平台后自动恢复全部筛选', async () => {
+    const { rerender } = render(<QuotaAccountPoolView kind="sub2api" accounts={accounts} />)
+    fireEvent.change(screen.getByRole('combobox', { name: '平台' }), { target: { value: 'anthropic' } })
+    expect(screen.getByRole('combobox', { name: '平台' })).toHaveValue('anthropic')
+
+    const openAIAccounts = accounts.filter((account) => account.provider === 'OpenAI')
+    rerender(<QuotaAccountPoolView kind="sub2api" accounts={openAIAccounts} />)
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '平台' })).toHaveValue('all'))
+    expect(screen.getByText('订阅账号 1')).toBeInTheDocument()
+  })
+
+  it('自动与手动刷新都只提交当前页，并原样展示绝对额度和百分比', async () => {
+    const quotaAccounts = accounts.map((account, index) => index === 0 ? {
+      ...account,
+      quotaState: 'available' as const,
+      quotaWindows: [{
+        key: 'balance',
+        label: '账号余额',
+        remainingValue: '0001.2300',
+        limitValue: '010.0000',
+        unit: 'USD',
+        remainingPercent: '12.3',
+        resetAt: '2026-08-01T08:00:00Z'
+      }]
+    } : account)
+    const onRefreshQuota = vi.fn(async (accountIds: string[]) => ({
+      accounts: quotaAccounts.filter((account) => accountIds.includes(account.id)),
+      refreshedCount: accountIds.length,
+      unavailableCount: 0,
+      unsupportedCount: 0
+    }))
+
+    render(<QuotaAccountPoolView kind="sub2api" accounts={quotaAccounts} onRefreshQuota={onRefreshQuota} />)
+
+    expect(screen.getByText('0001.2300 / 010.0000 USD')).toBeInTheDocument()
+    expect(screen.getByText('剩余 12.3%')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '账号余额剩余 12.3%' })).toHaveValue(12.3)
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenCalledWith(accounts.slice(0, 10).map((account) => account.id)))
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenLastCalledWith(['sub2-11', 'sub2-12']))
+    fireEvent.click(screen.getByRole('button', { name: '刷新本页额度' }))
+    await waitFor(() => expect(onRefreshQuota).toHaveBeenLastCalledWith(['sub2-11', 'sub2-12']))
   })
 })

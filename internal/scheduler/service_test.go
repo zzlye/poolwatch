@@ -28,17 +28,22 @@ type cancelRunner struct {
 }
 
 type quotaRunner struct {
-	requested []string
-	accounts  []monitor.AccountStatus
+	requested        []string
+	accounts         []monitor.AccountStatus
+	targetKind       monitor.TargetKind
+	credentialUpdate *monitor.Credential
 }
 
 func (runner *quotaRunner) Run(_ context.Context, target monitor.TargetInput) (monitor.Result, error) {
 	return monitor.Snapshot{TargetID: target.ID, Kind: target.Kind, Status: monitor.TargetStatusHealthy}, nil
 }
 
-func (runner *quotaRunner) RefreshAccountQuotas(_ context.Context, _ monitor.TargetInput, accountIDs []string) ([]monitor.AccountStatus, error) {
+func (runner *quotaRunner) RefreshAccountQuotas(_ context.Context, target monitor.TargetInput, accountIDs []string) (monitor.AccountQuotaRefreshResult, error) {
 	runner.requested = append([]string(nil), accountIDs...)
-	return append([]monitor.AccountStatus(nil), runner.accounts...), nil
+	runner.targetKind = target.Kind
+	return monitor.AccountQuotaRefreshResult{
+		Accounts: append([]monitor.AccountStatus(nil), runner.accounts...), CredentialUpdate: runner.credentialUpdate,
+	}, nil
 }
 
 func (runner cancelRunner) Run(ctx context.Context, _ monitor.TargetInput) (monitor.Result, error) {
@@ -312,8 +317,66 @@ func TestRefreshAccountQuotasRejectsOtherTargetKinds(t *testing.T) {
 	defer database.Close()
 	service := NewService(database, vault, &quotaRunner{}, alerts.NewEngine(database, nil), false)
 	_, err := service.RefreshAccountQuotas(context.Background(), target.ID, []string{"0123456789abcdef01234567"})
-	if err == nil || !strings.Contains(err.Error(), "只有 CLIProxyAPI") {
+	if err == nil || !strings.Contains(err.Error(), "不支持账号额度刷新") {
 		t.Fatalf("其他渠道类型应被拒绝: %v", err)
+	}
+}
+
+func TestRefreshSub2APIAccountQuotasUsesTargetKindForPublicID(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	credentialJSON, _ := json.Marshal(monitor.Credential{AccessToken: "user-token", AdminKey: "admin-token"})
+	credentialEncrypted, err := vault.Encrypt(credentialJSON)
+	if err != nil {
+		t.Fatalf("加密 Sub2API 凭据失败: %v", err)
+	}
+	target.Kind = string(monitor.TargetKindSub2API)
+	target.CredentialsEnc = credentialEncrypted
+	target.ConfigJSON = `{}`
+	if err := database.UpdateTarget(context.Background(), target); err != nil {
+		t.Fatalf("更新 Sub2API 测试渠道失败: %v", err)
+	}
+	publicID := monitor.PublicAccountID(monitor.TargetKindSub2API, "sub2-account")
+	if err := database.ReplaceChatAccounts(context.Background(), target.ID, []store.ChatAccount{{
+		TargetID: target.ID, ExternalID: publicID, Provider: "openai", Type: "plus",
+		Status: string(monitor.TargetStatusHealthy), StatusText: "可用",
+	}}); err != nil {
+		t.Fatalf("保存 Sub2API 测试账号失败: %v", err)
+	}
+	remaining, limit := decimal.NewFromInt(12), decimal.NewFromInt(20)
+	runner := &quotaRunner{
+		credentialUpdate: &monitor.Credential{AccessToken: "new-access", RefreshToken: "new-refresh", AdminKey: "admin-token"},
+		accounts: []monitor.AccountStatus{{
+			ExternalID: "sub2-account", Provider: "openai", QuotaState: monitor.AccountQuotaStateAvailable,
+			QuotaWindows: []monitor.AccountQuotaWindow{{
+				Key: "daily-usd", Label: "每日额度", RemainingValue: &remaining, LimitValue: &limit, Unit: "USD",
+			}},
+		}},
+	}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	updated, err := service.RefreshAccountQuotas(context.Background(), target.ID, []string{publicID})
+	if err != nil {
+		t.Fatalf("刷新 Sub2API 当前页额度失败: %v", err)
+	}
+	if runner.targetKind != monitor.TargetKindSub2API || len(updated) != 1 || updated[0].ExternalID != publicID {
+		t.Fatalf("Sub2API 刷新没有使用真实渠道类型：kind=%s accounts=%#v", runner.targetKind, updated)
+	}
+	if len(updated[0].QuotaWindows) != 1 || updated[0].QuotaWindows[0].RemainingValue != "12" ||
+		updated[0].QuotaWindows[0].LimitValue != "20" || updated[0].QuotaWindows[0].Unit != "USD" {
+		t.Fatalf("Sub2API 绝对额度没有保存：%#v", updated[0])
+	}
+	persisted, err := database.TargetByID(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("读取轮换后的 Sub2API 凭据失败：%v", err)
+	}
+	decrypted, err := vault.Decrypt(persisted.CredentialsEnc)
+	if err != nil {
+		t.Fatalf("解密轮换后的 Sub2API 凭据失败：%v", err)
+	}
+	var savedCredential monitor.Credential
+	if err := json.Unmarshal(decrypted, &savedCredential); err != nil || savedCredential.AccessToken != "new-access" ||
+		savedCredential.RefreshToken != "new-refresh" || savedCredential.AdminKey != "admin-token" {
+		t.Fatalf("额度刷新轮换后的凭据没有持久化：%#v, %v", savedCredential, err)
 	}
 }
 

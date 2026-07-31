@@ -85,3 +85,45 @@ test('390×844：CLIProxyAPI 账号列表和四项筛选不产生横向滚动', 
   await expect(page.getByText('显示第 1–20 条，共 24 条')).toBeVisible()
   await expectNoHorizontalScroll(page)
 })
+
+test('Sub2API 号池可筛选平台、类型和状态并显示真实额度', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/targets/sub2api-backup')
+
+  await expect(page.getByRole('heading', { name: 'Sub2API 账号状态' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '刷新本页额度' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: '平台' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: '成功' })).toHaveCount(0)
+  await expect(page.getByText('显示第 1–10 条，共 16 条')).toBeVisible()
+  await expect(page.getByText('16 / 21 USD')).toBeVisible()
+
+  await page.getByRole('combobox', { name: '平台' }).selectOption('anthropic')
+  await page.getByRole('combobox', { name: '账号类型' }).selectOption('bedrock')
+  await page.getByRole('combobox', { name: '账号状态' }).selectOption('warning')
+
+  await expect(page.getByText(/显示第 1–2 条，共 2 条/)).toBeVisible()
+  await expect(page.getByText('上游账号 2')).toBeVisible()
+  await expect(page.getByText('上游账号 14')).toBeVisible()
+  await expect(page.locator('.status-pill').filter({ hasText: '限流或冷却中' })).toHaveCount(2)
+  await page.getByRole('button', { name: '刷新本页额度' }).click()
+  await expect(page.getByText(/本页额度已刷新/)).toBeVisible()
+  await expectNoHorizontalScroll(page)
+})
+
+test('390×844：Sub2API 号池分页和额度卡片不产生横向滚动', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/targets/sub2api-backup')
+
+  await expect(page.getByRole('heading', { name: 'Sub2API 账号状态' })).toBeVisible()
+  await page.getByRole('heading', { name: 'Sub2API 账号状态' }).scrollIntoViewIfNeeded()
+  await expect(page.getByRole('combobox', { name: '平台' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '账号类型' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '账号状态' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '每页数量' })).toHaveValue('10')
+  await expect(page.getByText('16 / 21 USD')).toBeVisible()
+  await expectNoHorizontalScroll(page)
+
+  await page.getByRole('button', { name: '下一页' }).click()
+  await expect(page.getByText('显示第 11–16 条，共 16 条')).toBeVisible()
+  await expectNoHorizontalScroll(page)
+})

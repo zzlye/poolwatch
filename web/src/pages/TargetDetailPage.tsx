@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle2, Clock3, Edit3, ExternalLink, LoaderCircle, Ref
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { AccountPoolView } from '../components/AccountPoolView'
-import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
+import { QuotaAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { GroupMultiplierEditor } from '../components/GroupMultiplierEditor'
 import { LineChart } from '../components/LineChart'
@@ -165,7 +165,14 @@ export default function TargetDetailPage() {
       {target.kind === 'cliproxyapi' ? (
         <section className="content-section" aria-labelledby="cliproxy-account-title">
           <div className="section-heading"><div><h2 id="cliproxy-account-title">CLIProxyAPI 账号状态</h2><p>只读显示账号、提供商、类型、状态、真实额度、调用统计与恢复时间。</p></div></div>
-          {target.accounts?.length ? <CLIProxyAccountPoolView key={id} accounts={target.accounts} onRefreshQuota={quotaRefreshMutation.mutateAsync} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
+          {target.accounts?.length ? <QuotaAccountPoolView key={id} kind="cliproxyapi" accounts={target.accounts} onRefreshQuota={quotaRefreshMutation.mutateAsync} /> : <EmptyState title="暂无账号明细" description="请确认管理密钥有效并完成一次检测。" />}
+        </section>
+      ) : null}
+
+      {target.kind === 'sub2api' ? (
+        <section className="content-section" aria-labelledby="sub2api-account-title">
+          <div className="section-heading"><div><h2 id="sub2api-account-title">Sub2API 账号状态</h2><p>只读显示账号、平台、类型、状态、额度与恢复时间。</p></div></div>
+          {target.accounts?.length ? <QuotaAccountPoolView key={id} kind="sub2api" accounts={target.accounts} onRefreshQuota={quotaRefreshMutation.mutateAsync} /> : <EmptyState title="暂无账号明细" description="需管理员账号或管理员 API Key；普通账号余额检测仍可正常使用。" />}
         </section>
       ) : null}
 

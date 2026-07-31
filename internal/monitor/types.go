@@ -168,11 +168,14 @@ type Metric struct {
 }
 
 // AccountQuotaWindow 表示单个账号由上游明确返回的一项额度窗口。
-// RemainingPercent 为空时只展示重置时间，不推测或补造剩余额度。
+// 百分比和绝对值都只保存上游明确给出的数据，不推测或补造剩余额度。
 type AccountQuotaWindow struct {
 	Key              string           `json:"key"`
 	Label            string           `json:"label"`
 	RemainingPercent *decimal.Decimal `json:"remaining_percent,omitempty"`
+	RemainingValue   *decimal.Decimal `json:"remaining_value,omitempty"`
+	LimitValue       *decimal.Decimal `json:"limit_value,omitempty"`
+	Unit             string           `json:"unit,omitempty"`
 	ResetAt          string           `json:"reset_at,omitempty"`
 }
 
@@ -298,7 +301,13 @@ type Runner interface {
 
 // AccountQuotaRefresher 按前端已经取得的脱敏账号标识刷新少量账号额度。
 type AccountQuotaRefresher interface {
-	RefreshAccountQuotas(ctx context.Context, target TargetInput, accountIDs []string) ([]AccountStatus, error)
+	RefreshAccountQuotas(ctx context.Context, target TargetInput, accountIDs []string) (AccountQuotaRefreshResult, error)
+}
+
+// AccountQuotaRefreshResult 同时携带额度结果和读取过程中轮换后的登录凭据。
+type AccountQuotaRefreshResult struct {
+	Accounts         []AccountStatus
+	CredentialUpdate *Credential
 }
 
 // Prober 是连接测试接口使用的临时响应探测契约。

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestCLIProxyAPI额度解析支持三类账号(t *testing.T) {
+func TestCLIProxyAPI额度解析支持四类账号(t *testing.T) {
 	now := time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)
 	codex := parseCLIProxyAPICodexQuotaWindows(map[string]any{
 		"rate_limit": map[string]any{
@@ -75,6 +75,89 @@ func TestCLIProxyAPI额度解析支持三类账号(t *testing.T) {
 		}},
 	})
 	assertCLIProxyAPIQuotaWindowLabel(t, antigravitySummary, "summary-1-weekly", "Gemini 模型 · 每周额度", "65")
+
+	claude := parseCLIProxyAPIClaudeQuotaWindows(map[string]any{
+		"five_hour":      map[string]any{"utilization": "20", "resets_at": "2026-07-20T09:00:00Z"},
+		"seven_day_opus": map[string]any{"utilization": 35, "resets_at": "2026-07-27T08:00:00Z"},
+		"iguana_necktie": map[string]any{"utilization": 90, "resets_at": "2026-07-26T08:00:00Z"},
+		"extra_usage":    map[string]any{"is_enabled": true, "monthly_limit": 5000, "used_credits": 1250},
+		"limits": []any{
+			map[string]any{
+				"kind": "weekly_scoped", "percent": "无效", "is_active": true,
+				"resets_at": "2026-07-26T10:00:00Z",
+				"scope":     map[string]any{"model": map[string]any{"display_name": "Fable 5"}},
+			},
+			map[string]any{
+				"kind": "weekly_scoped", "percent": 45,
+				"resets_at": "2026-07-27T10:00:00Z",
+				"scope":     map[string]any{"model": map[string]any{"display_name": "Fable 5"}},
+			},
+		},
+	})
+	assertCLIProxyAPIQuotaWindowLabel(t, claude, "claude-5h", "5 小时", "80")
+	assertCLIProxyAPIQuotaWindowLabel(t, claude, "claude-7d-opus", "7 天 Opus", "65")
+	assertCLIProxyAPIQuotaWindowLabel(t, claude, "claude-7d-fable", "7 天 Fable", "55")
+	extraUsage := findCLIProxyAPIQuotaWindow(t, claude, "claude-extra-usage")
+	if extraUsage.RemainingValue == nil || extraUsage.RemainingValue.String() != "37.5" ||
+		extraUsage.LimitValue == nil || extraUsage.LimitValue.String() != "50" || extraUsage.Unit != "USD" {
+		t.Fatalf("Claude 额外用量金额不正确：%#v", extraUsage)
+	}
+	if plan := parseCLIProxyAPIClaudePlanType(map[string]any{"account": map[string]any{"has_claude_max": 1}}); plan != "max" {
+		t.Fatalf("Claude 数字套餐标志没有兼容：%s", plan)
+	}
+	if plan := parseCLIProxyAPIClaudePlanType(map[string]any{"account": map[string]any{"has_claude_pro": "yes"}}); plan != "pro" {
+		t.Fatalf("Claude 文本套餐标志没有兼容：%s", plan)
+	}
+}
+
+func TestCLIProxyAPIClaude额度使用官方OAuth接口(t *testing.T) {
+	var usageHeaders map[string]any
+	var profileCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v0/management/api-call", func(writer http.ResponseWriter, request *http.Request) {
+		var call map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&call); err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch call["url"] {
+		case "https://api.anthropic.com/api/oauth/usage":
+			usageHeaders, _ = call["header"].(map[string]any)
+			writeTestJSON(writer, map[string]any{
+				"status_code": 200,
+				"body": `{"five_hour":{"utilization":25,"resets_at":"2026-07-20T09:00:00Z"},` +
+					`"seven_day":{"utilization":60,"resets_at":"2026-07-27T08:00:00Z"}}`,
+			})
+		case "https://api.anthropic.com/api/oauth/profile":
+			profileCalls.Add(1)
+			writeTestJSON(writer, map[string]any{
+				"status_code": 200,
+				"body":        `{"account":{"has_claude_pro":true}}`,
+			})
+		default:
+			writeTestJSON(writer, map[string]any{"status_code": 404, "body": `{}`})
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	result, ok := adapter.queryCLIProxyAPIQuota(
+		context.Background(), adapter.http.newSession(true),
+		TargetConfig{BaseURL: server.URL, AllowPrivateNetwork: true}, "management-secret", "claude",
+		map[string]any{"auth_index": "claude-oauth"},
+	)
+	if !ok || result.PlanType != "pro" || len(result.Windows) != 2 {
+		t.Fatalf("Claude OAuth 额度读取失败：%#v", result)
+	}
+	assertCLIProxyAPIQuotaWindow(t, result.Windows, "claude-5h", "75", "2026-07-20T09:00:00Z")
+	assertCLIProxyAPIQuotaWindow(t, result.Windows, "claude-7d", "40", "2026-07-27T08:00:00Z")
+	if usageHeaders["Authorization"] != "Bearer $TOKEN$" || usageHeaders["anthropic-beta"] != "oauth-2025-04-20" {
+		t.Fatalf("Claude OAuth 额度请求头不正确：%#v", usageHeaders)
+	}
+	if profileCalls.Load() != 1 || !cliProxyAPIProviderHasQuotaEndpoint("claude") {
+		t.Fatalf("Claude 套餐补充或额度能力判断不正确，profile 调用=%d", profileCalls.Load())
+	}
 }
 
 func TestCLIProxyAPI额度刷新账号数量与标识校验(t *testing.T) {
@@ -114,7 +197,7 @@ func TestCLIProxyAPI常规检测不查额度且按账号选择刷新(t *testing.
 				"auth_index": "codex-other-page", "provider": "codex", "status": "active",
 				"id_token": map[string]any{"chatgpt_account_id": "account-other-page"},
 			},
-			map[string]any{"auth_index": "claude-no-quota", "provider": "claude", "status": "active"},
+			map[string]any{"auth_index": "claude-no-quota", "provider": "claude", "account_type": "api_key", "status": "active"},
 		}})
 	})
 	mux.HandleFunc("/v0/management/api-call", func(writer http.ResponseWriter, request *http.Request) {
@@ -172,9 +255,9 @@ func TestCLIProxyAPI常规检测不查额度且按账号选择刷新(t *testing.
 	if err != nil {
 		t.Fatalf("刷新当前页额度失败：%v", err)
 	}
-	good := findCLIProxyAPIAccount(t, refreshed, "codex-good")
-	failed := findCLIProxyAPIAccount(t, refreshed, "codex-failed")
-	unsupported := findCLIProxyAPIAccount(t, refreshed, "claude-no-quota")
+	good := findCLIProxyAPIAccount(t, refreshed.Accounts, "codex-good")
+	failed := findCLIProxyAPIAccount(t, refreshed.Accounts, "codex-failed")
+	unsupported := findCLIProxyAPIAccount(t, refreshed.Accounts, "claude-no-quota")
 	if good.Status != string(TargetStatusHealthy) || good.QuotaState != AccountQuotaStateAvailable || good.Type != "plus" {
 		t.Fatalf("额度刷新不应改变账号健康状态：%#v", good)
 	}
@@ -438,7 +521,7 @@ func TestCLIProxyAPI慢账号不会长期占用全部额度查询工位(t *testi
 		t.Fatalf("慢账号不应阻止后续账号开始查询，实际调用 %d 次", calls.Load())
 	}
 	for _, externalID := range []string{"codex-e", "codex-f", "codex-g", "codex-h"} {
-		account := findCLIProxyAPIAccount(t, refreshed, externalID)
+		account := findCLIProxyAPIAccount(t, refreshed.Accounts, externalID)
 		if account.QuotaState != AccountQuotaStateAvailable {
 			t.Fatalf("后续账号应正常取得额度：%#v", account)
 		}
@@ -471,6 +554,17 @@ func assertCLIProxyAPIQuotaWindowLabel(t *testing.T, windows []AccountQuotaWindo
 		return
 	}
 	t.Fatalf("缺少额度窗口：%s，全部窗口=%#v", key, windows)
+}
+
+func findCLIProxyAPIQuotaWindow(t *testing.T, windows []AccountQuotaWindow, key string) AccountQuotaWindow {
+	t.Helper()
+	for _, window := range windows {
+		if window.Key == key {
+			return window
+		}
+	}
+	t.Fatalf("缺少额度窗口：%s，全部窗口=%#v", key, windows)
+	return AccountQuotaWindow{}
 }
 
 func findCLIProxyAPIAccount(t *testing.T, accounts []AccountStatus, externalID string) AccountStatus {

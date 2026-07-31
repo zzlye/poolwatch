@@ -280,7 +280,17 @@ func (s *Server) handleRefreshAccountQuotas(response http.ResponseWriter, reques
 		writeAPIError(response, http.StatusBadRequest, "每次需要选择 1 至 100 个账号")
 		return
 	}
-	accounts, err := s.dependencies.Scheduler.RefreshAccountQuotas(request.Context(), request.PathValue("id"), body.AccountIDs)
+	targetID := request.PathValue("id")
+	target, err := s.dependencies.Store.TargetByID(request.Context(), targetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeAPIError(response, http.StatusNotFound, "渠道不存在")
+		return
+	}
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "读取渠道失败")
+		return
+	}
+	accounts, err := s.dependencies.Scheduler.RefreshAccountQuotas(request.Context(), targetID, body.AccountIDs)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAPIError(response, http.StatusNotFound, "渠道不存在")
 		return
@@ -300,7 +310,7 @@ func (s *Server) handleRefreshAccountQuotas(response http.ResponseWriter, reques
 		case monitor.ErrorClassResponse:
 			writeAPIError(response, http.StatusConflict, err.Error())
 		default:
-			if strings.Contains(err.Error(), "只有 CLIProxyAPI") {
+			if strings.Contains(err.Error(), "不支持账号额度刷新") {
 				writeAPIError(response, http.StatusBadRequest, err.Error())
 			} else {
 				writeAPIError(response, http.StatusBadGateway, "刷新账号额度失败，请稍后重试")
@@ -310,7 +320,7 @@ func (s *Server) handleRefreshAccountQuotas(response http.ResponseWriter, reques
 	}
 	result := accountQuotaRefreshResponse{Accounts: make([]accountResponse, 0, len(accounts))}
 	for _, account := range accounts {
-		result.Accounts = append(result.Accounts, mapAccountResponse(string(monitor.TargetKindCLIProxyAPI), account))
+		result.Accounts = append(result.Accounts, mapAccountResponse(target.Kind, account))
 		switch account.QuotaState {
 		case monitor.AccountQuotaStateAvailable:
 			result.RefreshedCount++
@@ -320,9 +330,9 @@ func (s *Server) handleRefreshAccountQuotas(response http.ResponseWriter, reques
 			result.UnavailableCount++
 		}
 	}
-	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.account_quotas_refreshed", request.PathValue("id"),
+	_ = s.dependencies.Store.AddAuditEvent(request.Context(), "target.account_quotas_refreshed", targetID,
 		fmt.Sprintf("刷新当前页 %d 个账号额度", len(result.Accounts)), time.Now().UTC())
-	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": request.PathValue("id")})
+	s.dependencies.Events.Publish("target.updated", map[string]string{"targetId": targetID})
 	writeJSON(response, http.StatusOK, result)
 }
 
@@ -547,6 +557,11 @@ func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existin
 	if err != nil {
 		return monitor.Credential{}, "", err
 	}
+	if existing != nil && !sameTargetOrigin(existing.BaseURL, baseURL) {
+		// 渠道来源变化时不得复用旧来源的任何凭据，避免把管理密钥或登录令牌发送到新站点。
+		credential = monitor.Credential{}
+		existingMode = ""
+	}
 	if kind == monitor.TargetKindNewAPI || kind == monitor.TargetKindSub2API {
 		requestedMode := resolveCredentialMode(draft, kind, existingMode)
 		if strings.TrimSpace(draft.BrowserAuthAttemptID) != "" {
@@ -566,10 +581,20 @@ func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existin
 			if err != nil {
 				return monitor.Credential{}, "", err
 			}
+			if kind == monitor.TargetKindSub2API {
+				// 网页助手只导入用户登录令牌，已有或本次填写的只读管理密钥必须独立保留。
+				imported.AdminKey = credential.AdminKey
+				mergeString(&imported.AdminKey, draft.AdminKey)
+			}
 			return imported, requestedMode, nil
 		}
 		if requestedMode != existingMode {
+			adminKey := credential.AdminKey
 			credential = monitor.Credential{}
+			if kind == monitor.TargetKindSub2API {
+				// 用户登录方式与管理员只读接口互不依赖，切换登录方式时不清空管理密钥。
+				credential.AdminKey = adminKey
+			}
 		}
 		switch kind {
 		case monitor.TargetKindNewAPI:
@@ -626,6 +651,29 @@ func (s *Server) mergeCredential(ctx context.Context, draft targetDraft, existin
 		return monitor.Credential{}, "", errors.New("自定义认证方式不受支持")
 	}
 	return credential, "", nil
+}
+
+func sameTargetOrigin(left, right string) bool {
+	leftURL, leftErr := url.Parse(strings.TrimSpace(left))
+	rightURL, rightErr := url.Parse(strings.TrimSpace(right))
+	if leftErr != nil || rightErr != nil || leftURL.Hostname() == "" || rightURL.Hostname() == "" {
+		return false
+	}
+	effectivePort := func(parsed *url.URL) string {
+		if port := parsed.Port(); port != "" {
+			return port
+		}
+		if strings.EqualFold(parsed.Scheme, "https") {
+			return "443"
+		}
+		if strings.EqualFold(parsed.Scheme, "http") {
+			return "80"
+		}
+		return ""
+	}
+	return strings.EqualFold(leftURL.Scheme, rightURL.Scheme) &&
+		strings.EqualFold(leftURL.Hostname(), rightURL.Hostname()) &&
+		effectivePort(leftURL) == effectivePort(rightURL)
 }
 
 func (s *Server) existingCredential(existing *store.Target, kind monitor.TargetKind) (monitor.Credential, credentialMode, error) {
@@ -774,6 +822,7 @@ func mergeNewAPICredential(credential monitor.Credential, draft targetDraft, mod
 }
 
 func mergeSub2APICredential(credential monitor.Credential, draft targetDraft, mode credentialMode) (monitor.Credential, error) {
+	mergeString(&credential.AdminKey, draft.AdminKey)
 	switch mode {
 	case credentialModeSub2APIPassword:
 		credential.Username = ""
@@ -981,7 +1030,8 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		}
 		result.Metrics = append(result.Metrics, item)
 	}
-	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
+	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) ||
+		target.Kind == string(monitor.TargetKindSub2API) {
 		accounts, err := s.dependencies.Store.ListChatAccounts(ctx, target.ID)
 		if err != nil {
 			return targetResponse{}, err
@@ -999,17 +1049,18 @@ func mapAccountResponse(targetKind string, account store.ChatAccount) accountRes
 		Email: account.Email, Type: account.Type, Status: account.Status, StatusText: account.StatusText,
 		RecoveryAt: account.RestoreAt, Success: account.Success, Fail: account.Fail,
 	}
-	if targetKind == string(monitor.TargetKindCLIProxyAPI) {
+	if targetKind == string(monitor.TargetKindCLIProxyAPI) || targetKind == string(monitor.TargetKindSub2API) {
 		result.QuotaState = account.QuotaState
 		result.SubscriptionExpiresAt = account.SubscriptionExpiresAt
 		result.QuotaWindows = make([]accountQuotaWindowResponse, 0, len(account.QuotaWindows))
 		for _, window := range account.QuotaWindows {
 			result.QuotaWindows = append(result.QuotaWindows, accountQuotaWindowResponse{
-				Key: window.Key, Label: window.Label, RemainingPercent: window.RemainingPercent, ResetAt: window.ResetAt,
+				Key: window.Key, Label: window.Label, RemainingPercent: window.RemainingPercent,
+				RemainingValue: window.RemainingValue, LimitValue: window.LimitValue, Unit: window.Unit, ResetAt: window.ResetAt,
 			})
 		}
 	}
-	// 图片额度只属于 chatgpt2api，CLIProxyAPI 账号响应不携带没有实际含义的零值字段。
+	// 图片额度只属于 chatgpt2api，其他号池账号响应不携带没有实际含义的零值字段。
 	if targetKind == string(monitor.TargetKindChatGPT2API) {
 		result.ImageQuota = strconv.FormatInt(account.Quota, 10)
 	}

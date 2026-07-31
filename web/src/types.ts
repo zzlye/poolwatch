@@ -53,6 +53,9 @@ export interface AccountQuotaWindow {
   key: string
   label: string
   remainingPercent?: string
+  remainingValue?: string
+  limitValue?: string
+  unit?: string
   resetAt?: string
 }
 

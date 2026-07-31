@@ -202,6 +202,25 @@ function validateUrl(value: string, required = true): boolean {
   }
 }
 
+function targetOriginChanged(currentValue: string, nextValue: string): boolean {
+  try {
+    const current = new URL(currentValue)
+    const next = new URL(nextValue)
+    return current.origin !== next.origin
+  } catch {
+    // 用户仍在输入地址时暂不清空，形成有效的新来源后再执行隔离。
+    return false
+  }
+}
+
+function clearedCredentialFields(): Partial<TargetDraft> {
+  // 渠道来源或类型变化后，所有与旧来源绑定的身份和秘密都必须重新确认。
+  return {
+    username: '', email: '', password: '', totpSecret: '', totpCode: '',
+    accessToken: '', refreshToken: '', adminKey: '', userId: '', cookie: '', customHeaders: ''
+  }
+}
+
 function collectPointers(value: unknown, base = ''): string[] {
   if (value === null || typeof value !== 'object') return base ? [base] : []
   return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
@@ -655,6 +674,13 @@ function AuthenticationFields({
         </>
       ) : null}
 
+      {kind === 'sub2api' ? (
+        <>
+          <SecretField label="Admin API Key（读取号池）" value={draft.adminKey} show={showSecret} editing={editing} onChange={(adminKey) => update({ adminKey })} onToggle={() => setShowSecret((value) => !value)} optional />
+          <div className="inline-message tone-info span-2">使用管理员账号登录时可以不填；普通账号无法读取号池，如需查看账号明细请填写管理员 API Key。{editing ? '留空会沿用服务器中已配置的密钥。' : ''}</div>
+        </>
+      ) : null}
+
       {configuredForCurrentMode ? <div className="inline-message tone-info span-2">当前渠道已经配置此登录方式。秘密字段留空时沿用服务器中的加密配置；重新填写后才会替换。</div> : null}
     </>
   )
@@ -686,7 +712,12 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
   const changeBaseUrl = (baseUrl: string) => {
     // 地址一旦变化就立即作废旧授权上下文，异步返回的旧任务也不会重新覆盖当前表单。
     authTargetRef.current = { kind: draft.kind, baseUrl }
-    update({ baseUrl, browserAuthAttemptId: '' })
+    setDraft((current) => ({
+      ...current,
+      ...(targetOriginChanged(current.baseUrl, baseUrl) ? clearedCredentialFields() : {}),
+      baseUrl,
+      browserAuthAttemptId: ''
+    }))
     setAuthAttempt(null)
     setDetectionMessage('')
   }
@@ -705,6 +736,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
     authTargetRef.current = { kind, baseUrl: draft.baseUrl }
     setDraft((current) => ({
       ...current,
+      ...clearedCredentialFields(),
       kind,
       thresholds: thresholdsByKind[kind].map((item) => ({ ...item })),
       topupUrl: candidate,

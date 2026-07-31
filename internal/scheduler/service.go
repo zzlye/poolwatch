@@ -149,7 +149,7 @@ func (s *Service) CheckTarget(ctx context.Context, targetID string) error {
 	return s.runTarget(ctx, targetID)
 }
 
-// RefreshAccountQuotas 刷新 CLIProxyAPI 当前页账号额度，并与常规检测共用渠道锁。
+// RefreshAccountQuotas 刷新支持号池的渠道当前页账号额度，并与常规检测共用渠道锁。
 func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, accountIDs []string) ([]store.ChatAccount, error) {
 	if len(accountIDs) == 0 || len(accountIDs) > monitor.MaxAccountQuotaRefreshAccounts {
 		return nil, errors.New("每次需要选择 1 至 100 个账号")
@@ -169,8 +169,8 @@ func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, acc
 	if err != nil {
 		return nil, err
 	}
-	if target.Kind != string(monitor.TargetKindCLIProxyAPI) {
-		return nil, errors.New("只有 CLIProxyAPI 渠道支持账号额度刷新")
+	if target.Kind != string(monitor.TargetKindCLIProxyAPI) && target.Kind != string(monitor.TargetKindSub2API) {
+		return nil, errors.New("该渠道不支持账号额度刷新")
 	}
 	runtimeConfig, err := s.runtimeConfig(target)
 	if err != nil {
@@ -180,25 +180,34 @@ func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, acc
 	if !ok {
 		return nil, errors.New("当前检测器不支持账号额度刷新")
 	}
-	// 每四个账号为一批预留七秒，并为账号列表读取留出三十秒。
+	// 每四个账号按单请求超时和最多三次网络尝试预留二十秒，并为账号列表读取留出三十秒。
 	batches := (len(accountIDs) + 3) / 4
-	quotaTimeout := 30*time.Second + time.Duration(batches)*7*time.Second
+	quotaTimeout := 30*time.Second + time.Duration(batches)*20*time.Second
 	timeoutContext, cancel := context.WithTimeout(ctx, quotaTimeout)
 	defer cancel()
-	accounts, err := refresher.RefreshAccountQuotas(timeoutContext, runtimeConfig, accountIDs)
-	if err != nil {
+	quotaResult, err := refresher.RefreshAccountQuotas(timeoutContext, runtimeConfig, accountIDs)
+	if err != nil && quotaResult.CredentialUpdate == nil {
 		return nil, err
 	}
-	currentTarget, err := s.store.TargetByID(ctx, target.ID)
-	if errors.Is(err, sql.ErrNoRows) {
+	currentTarget, readErr := s.store.TargetByID(ctx, target.ID)
+	if errors.Is(readErr, sql.ErrNoRows) {
 		return nil, sql.ErrNoRows
 	}
-	if err != nil {
-		return nil, err
+	if readErr != nil {
+		return nil, readErr
 	}
 	if targetMonitoringConfigChanged(target, currentTarget) {
 		return nil, errors.New("渠道配置已经变化，请刷新页面后重试")
 	}
+	if quotaResult.CredentialUpdate != nil {
+		if err := s.persistCredentialUpdate(ctx, &currentTarget, quotaResult.CredentialUpdate); err != nil {
+			return nil, err
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	accounts := quotaResult.Accounts
 	if err := s.alerts.SaveAccountQuotas(ctx, currentTarget, accounts); err != nil {
 		return nil, err
 	}
@@ -212,7 +221,7 @@ func (s *Service) RefreshAccountQuotas(ctx context.Context, targetID string, acc
 	}
 	result := make([]store.ChatAccount, 0, len(accounts))
 	for _, account := range accounts {
-		publicID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, account.ExternalID)
+		publicID := monitor.PublicAccountID(monitor.TargetKind(target.Kind), account.ExternalID)
 		stored, exists := byID[publicID]
 		if !exists {
 			return nil, errors.New("账号列表已经变化，请刷新页面后重试")

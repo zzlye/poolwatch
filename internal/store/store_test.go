@@ -160,7 +160,8 @@ func TestChatAccounts支持泛化安全字段(t *testing.T) {
 		TargetID: target.ID, ExternalID: "hashed-id", DisplayName: "主账号", Provider: "codex",
 		Email: "pr***@example.com", Type: "plus", Status: "warning", StatusText: "额度冷却中",
 		QuotaState: "available", QuotaWindows: []AccountQuotaWindow{{
-			Key: "code-5h", Label: "5 小时", RemainingPercent: "42.5", ResetAt: "2026-07-20T09:00:00Z",
+			Key: "code-5h", Label: "5 小时", RemainingPercent: "42.5", RemainingValue: "8.5",
+			LimitValue: "10", Unit: "USD", ResetAt: "2026-07-20T09:00:00Z",
 		}},
 		SubscriptionExpiresAt: "2026-08-20T08:00:00Z",
 		RestoreAt:             "2026-07-21T00:00:00Z", Success: 8, Fail: 2, ObservedAt: now,
@@ -177,7 +178,9 @@ func TestChatAccounts支持泛化安全字段(t *testing.T) {
 		t.Fatalf("泛化账号字段不完整：%#v", account)
 	}
 	if account.QuotaState != "available" || account.SubscriptionExpiresAt != "2026-08-20T08:00:00Z" ||
-		len(account.QuotaWindows) != 1 || account.QuotaWindows[0].RemainingPercent != "42.5" {
+		len(account.QuotaWindows) != 1 || account.QuotaWindows[0].RemainingPercent != "42.5" ||
+		account.QuotaWindows[0].RemainingValue != "8.5" || account.QuotaWindows[0].LimitValue != "10" ||
+		account.QuotaWindows[0].Unit != "USD" {
 		t.Fatalf("泛化账号额度字段不完整：%#v", account)
 	}
 

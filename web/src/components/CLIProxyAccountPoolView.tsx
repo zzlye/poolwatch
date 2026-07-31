@@ -77,6 +77,15 @@ function formatQuotaPercent(value: number): string {
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(value)
 }
 
+function absoluteQuotaText(window: NonNullable<SanitizedAccount['quotaWindows']>[number]): string | undefined {
+  const remaining = window.remainingValue?.trim()
+  const limit = window.limitValue?.trim()
+  if (!remaining && !limit) return undefined
+  // 绝对额度保持服务端返回的十进制字符串，不进行浮点换算，避免金额或次数丢失精度。
+  const value = remaining && limit ? `${remaining} / ${limit}` : remaining ? `剩余 ${remaining}` : `总额 ${limit}`
+  return `${value}${window.unit?.trim() ? ` ${window.unit.trim()}` : ''}`
+}
+
 function quotaProgressTone(value: number): string {
   if (value <= 20) return 'low'
   if (value <= 50) return 'medium'
@@ -86,12 +95,15 @@ function quotaProgressTone(value: number): string {
 function QuotaWindowView({ window }: { window: NonNullable<SanitizedAccount['quotaWindows']>[number] }) {
   const percent = quotaPercent(window.remainingPercent)
   const label = window.label.trim() || '额度'
+  const absoluteQuota = absoluteQuotaText(window)
+  const quotaValueText = absoluteQuota ?? (percent === undefined ? '剩余比例未知' : `${formatQuotaPercent(percent)}%`)
   return (
     <li className="account-quota-window">
       <div className="account-quota-heading">
         <span title={label}>{label}</span>
-        <strong>{percent === undefined ? '剩余比例未知' : `${formatQuotaPercent(percent)}%`}</strong>
+        <strong title={quotaValueText}>{quotaValueText}</strong>
       </div>
+      {absoluteQuota && percent !== undefined ? <small className="account-quota-percent">剩余 {formatQuotaPercent(percent)}%</small> : null}
       {percent === undefined ? null : <progress className={`account-quota-progress ${quotaProgressTone(percent)}`} max={100} value={percent} aria-label={`${label}剩余 ${formatQuotaPercent(percent)}%`} />}
       <small>{window.resetAt ? `重置：${formatDateTime(window.resetAt)}` : '重置时间未知'}</small>
     </li>
@@ -134,9 +146,12 @@ function AccountQuotaView({ account }: { account: SanitizedAccount }) {
   )
 }
 
-interface CLIProxyAccountPoolViewProps {
+export type QuotaAccountPoolKind = 'cliproxyapi' | 'sub2api'
+
+interface QuotaAccountPoolViewProps {
   accounts: SanitizedAccount[]
   onRefreshQuota?: (accountIds: string[]) => Promise<AccountQuotaRefreshResult>
+  kind: QuotaAccountPoolKind
 }
 
 interface RefreshFeedback {
@@ -149,7 +164,7 @@ function refreshSuccessMessage(result: AccountQuotaRefreshResult): string {
   return `本页额度已刷新：更新 ${result.refreshedCount} 个，暂未获取 ${result.unavailableCount} 个${unsupported}。`
 }
 
-export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAccountPoolViewProps) {
+export function QuotaAccountPoolView({ accounts, onRefreshQuota, kind }: QuotaAccountPoolViewProps) {
   const [search, setSearch] = useState('')
   const [provider, setProvider] = useState('all')
   const [type, setType] = useState('all')
@@ -158,7 +173,8 @@ export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAc
   const [requestedPage, setRequestedPage] = useState(1)
   const [pendingRefreshes, setPendingRefreshes] = useState(0)
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>()
-  const autoRefreshedPageKeys = useRef(new Set<string>())
+  const [automaticRefreshRequest, setAutomaticRefreshRequest] = useState(0)
+  const handledAutomaticRefreshRequest = useRef(-1)
   const pendingPageKeys = useRef(new Set<string>())
   const refreshQueue = useRef<Promise<void>>(Promise.resolve())
 
@@ -186,7 +202,11 @@ export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAc
   const lastVisible = filteredAccounts.length ? Math.min(startIndex + pageSize, filteredAccounts.length) : 0
   const hasFilters = Boolean(search.trim()) || provider !== 'all' || type !== 'all' || status !== 'all'
   const currentAccountIds = useMemo(() => pagedAccounts.map((account) => account.id), [pagedAccounts])
-  const currentPageKey = useMemo(() => JSON.stringify(currentAccountIds), [currentAccountIds])
+  const currentAccountIdsRef = useRef(currentAccountIds)
+  currentAccountIdsRef.current = currentAccountIds
+  const isSub2API = kind === 'sub2api'
+  const productName = isSub2API ? 'Sub2API' : 'CLIProxyAPI'
+  const providerLabel = isSub2API ? '平台' : '提供商'
 
   const queueQuotaRefresh = useCallback((accountIds: string[]) => {
     if (!onRefreshQuota || accountIds.length === 0) return
@@ -218,13 +238,26 @@ export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAc
   }, [currentPage, requestedPage])
 
   useEffect(() => {
-    if (!onRefreshQuota || currentAccountIds.length === 0 || autoRefreshedPageKeys.current.has(currentPageKey)) return
-    // 先记录再发起请求，可抑制严格模式和额度回写触发的重复自动刷新。
-    autoRefreshedPageKeys.current.add(currentPageKey)
-    queueQuotaRefresh(currentAccountIds)
-  }, [currentAccountIds, currentPageKey, onRefreshQuota, queueQuotaRefresh])
+    if (!onRefreshQuota || currentAccountIdsRef.current.length === 0) return
+    if (handledAutomaticRefreshRequest.current === automaticRefreshRequest) return
+    handledAutomaticRefreshRequest.current = automaticRefreshRequest
+    // 仅首次进入和用户明确翻页时自动刷新；筛选变化仍等待手动刷新，避免连续请求上游。
+    queueQuotaRefresh(currentAccountIdsRef.current)
+  }, [automaticRefreshRequest, onRefreshQuota, queueQuotaRefresh])
+
+  useEffect(() => {
+    if (provider !== 'all' && !providerOptions.some(([value]) => value === provider)) {
+      setProvider('all')
+      setRequestedPage(1)
+    }
+    if (type !== 'all' && !typeOptions.some(([value]) => value === type)) {
+      setType('all')
+      setRequestedPage(1)
+    }
+  }, [provider, providerOptions, type, typeOptions])
 
   const resetPage = () => setRequestedPage(1)
+  const requestPageRefresh = () => setAutomaticRefreshRequest((request) => request + 1)
   const resetFilters = () => {
     setSearch('')
     setProvider('all')
@@ -248,48 +281,52 @@ export function CLIProxyAccountPoolView({ accounts, onRefreshQuota }: CLIProxyAc
         </>
       ) : null}
 
-      <div className="account-filter-bar cliproxy-filter-bar" aria-label="CLIProxyAPI 账号筛选">
+      <div className="account-filter-bar cliproxy-filter-bar" aria-label={`${productName} 账号筛选`}>
         <label className="search-field">
-          <span className="sr-only">搜索 CLIProxyAPI 账号</span>
+          <span className="sr-only">搜索 {productName} 账号</span>
           <Search aria-hidden="true" size={18} />
-          <input type="search" value={search} onChange={(event) => { setSearch(event.target.value); resetPage() }} placeholder="搜索账号、邮箱或提供商" />
+          <input type="search" value={search} onChange={(event) => { setSearch(event.target.value); resetPage() }} placeholder={`搜索账号、邮箱或${providerLabel}`} />
         </label>
-        <label className="compact-field account-filter-field"><span>提供商</span><select value={provider} onChange={(event) => { setProvider(event.target.value); resetPage() }}><option value="all">全部提供商</option>{providerOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label className="compact-field account-filter-field"><span>{providerLabel}</span><select value={provider} onChange={(event) => { setProvider(event.target.value); resetPage() }}><option value="all">全部{providerLabel}</option>{providerOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label className="compact-field account-filter-field"><span>账号类型</span><select value={type} onChange={(event) => { setType(event.target.value); resetPage() }}><option value="all">全部类型</option>{typeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <label className="compact-field account-filter-field"><span>账号状态</span><select value={status} onChange={(event) => { setStatus(event.target.value as AccountStatusFilter); resetPage() }}>{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
       </div>
 
       {pagedAccounts.length ? (
         <div className="table-wrap cliproxy-account-table-wrap">
-          <table className="cliproxy-account-table">
-            <thead><tr><th scope="col">账号</th><th scope="col">提供商</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">额度</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">恢复时间</th></tr></thead>
+          <table className={isSub2API ? 'cliproxy-account-table sub2api-account-table' : 'cliproxy-account-table'}>
+            <thead><tr><th scope="col">账号</th><th scope="col">{providerLabel}</th><th scope="col">类型</th><th scope="col">状态</th><th scope="col">额度</th>{isSub2API ? null : <><th scope="col">成功</th><th scope="col">失败</th></>}<th scope="col">恢复时间</th></tr></thead>
             <tbody>{pagedAccounts.map((account) => (
               <tr key={account.id}>
                 <td data-label="账号"><strong>{accountTitle(account)}</strong>{account.displayName && account.email ? <small>{account.email}</small> : null}</td>
-                <td data-label="提供商">{account.provider || '—'}</td>
+                <td data-label={providerLabel}>{account.provider || '—'}</td>
                 <td data-label="类型">{account.type || '—'}</td>
                 <td data-label="状态"><StatusPill status={account.status} label={account.statusText || statusLabels[account.status]} /></td>
                 <td data-label="额度"><AccountQuotaView account={account} /></td>
-                <td data-label="成功">{formatCounter(account.success)}</td>
-                <td data-label="失败">{formatCounter(account.fail)}</td>
+                {isSub2API ? null : <><td data-label="成功">{formatCounter(account.success)}</td><td data-label="失败">{formatCounter(account.fail)}</td></>}
                 <td data-label="恢复时间">{account.recoveryAt ? formatDateTime(account.recoveryAt) : '—'}</td>
               </tr>
             ))}</tbody>
           </table>
         </div>
       ) : (
-        <EmptyState title="没有符合条件的账号" description="请调整账号、提供商、类型或状态筛选。" action={<button className="button secondary" type="button" onClick={resetFilters}>清除筛选</button>} />
+        <EmptyState title="没有符合条件的账号" description={`请调整账号、${providerLabel}、类型或状态筛选。`} action={<button className="button secondary" type="button" onClick={resetFilters}>清除筛选</button>} />
       )}
 
-      <nav className="account-pagination" aria-label="CLIProxyAPI 账号分页">
+      <nav className="account-pagination" aria-label={`${productName} 账号分页`}>
         <p className="account-page-summary" aria-live="polite">显示第 {firstVisible}–{lastVisible} 条，共 {filteredAccounts.length} 条{hasFilters ? <span>（账号总数 {accounts.length} 条）</span> : null}</p>
-        <label className="compact-field account-page-size"><span>每页数量</span><select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); resetPage() }}>{pageSizeOptions.map((size) => <option key={size} value={size}>{size} 条/页</option>)}</select></label>
+        <label className="compact-field account-page-size"><span>每页数量</span><select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); resetPage(); requestPageRefresh() }}>{pageSizeOptions.map((size) => <option key={size} value={size}>{size} 条/页</option>)}</select></label>
         <div className="account-page-buttons">
-          <button className="icon-button" type="button" aria-label="上一页" disabled={currentPage <= 1} onClick={() => setRequestedPage((page) => Math.max(1, page - 1))}><ChevronLeft aria-hidden="true" size={18} /></button>
-          {buildPageItems(currentPage, totalPages).map((item) => typeof item === 'number' ? <button key={item} className={item === currentPage ? 'account-page-button current' : 'account-page-button'} type="button" aria-label={`第 ${item} 页`} aria-current={item === currentPage ? 'page' : undefined} onClick={() => setRequestedPage(item)}>{item}</button> : <span key={item} className="account-page-ellipsis" aria-hidden="true">…</span>)}
-          <button className="icon-button" type="button" aria-label="下一页" disabled={currentPage >= totalPages} onClick={() => setRequestedPage((page) => Math.min(totalPages, page + 1))}><ChevronRight aria-hidden="true" size={18} /></button>
+          <button className="icon-button" type="button" aria-label="上一页" disabled={currentPage <= 1} onClick={() => { setRequestedPage((page) => Math.max(1, page - 1)); requestPageRefresh() }}><ChevronLeft aria-hidden="true" size={18} /></button>
+          {buildPageItems(currentPage, totalPages).map((item) => typeof item === 'number' ? <button key={item} className={item === currentPage ? 'account-page-button current' : 'account-page-button'} type="button" aria-label={`第 ${item} 页`} aria-current={item === currentPage ? 'page' : undefined} onClick={() => { setRequestedPage(item); requestPageRefresh() }}>{item}</button> : <span key={item} className="account-page-ellipsis" aria-hidden="true">…</span>)}
+          <button className="icon-button" type="button" aria-label="下一页" disabled={currentPage >= totalPages} onClick={() => { setRequestedPage((page) => Math.min(totalPages, page + 1)); requestPageRefresh() }}><ChevronRight aria-hidden="true" size={18} /></button>
         </div>
       </nav>
     </>
   )
+}
+
+// 保留旧组件名称，避免现有页面和测试在泛化号池组件后失去兼容性。
+export function CLIProxyAccountPoolView(props: Omit<QuotaAccountPoolViewProps, 'kind'>) {
+  return <QuotaAccountPoolView {...props} kind="cliproxyapi" />
 }

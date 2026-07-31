@@ -15,10 +15,11 @@ import (
 )
 
 type sub2APIAdapter struct {
-	http   *secureHTTPClient
-	mu     sync.Mutex
-	tokens map[string]sub2APIToken
-	now    func() time.Time
+	http                *secureHTTPClient
+	mu                  sync.Mutex
+	tokens              map[string]sub2APIToken
+	now                 func() time.Time
+	quotaRequestTimeout time.Duration
 }
 
 type sub2APIToken struct {
@@ -28,7 +29,10 @@ type sub2APIToken struct {
 }
 
 func newSub2APIAdapter(client *secureHTTPClient) *sub2APIAdapter {
-	return &sub2APIAdapter{http: client, tokens: make(map[string]sub2APIToken), now: time.Now}
+	return &sub2APIAdapter{
+		http: client, tokens: make(map[string]sub2APIToken), now: time.Now,
+		quotaRequestTimeout: sub2APIQuotaAccountTimeout,
+	}
 }
 
 func (adapter *sub2APIAdapter) Kind() TargetKind {
@@ -38,21 +42,7 @@ func (adapter *sub2APIAdapter) Kind() TargetKind {
 func (adapter *sub2APIAdapter) Check(ctx context.Context, target TargetConfig) (Snapshot, error) {
 	target = ensureTargetKind(target, adapter.Kind())
 	session := adapter.http.newSession(target.AllowPrivateNetwork)
-	// 优先使用尚未过期的内存令牌，避免每轮检测都触发登录限流。
-	token, err := adapter.resolveToken(ctx, session, target)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	me, err := adapter.readCurrentUser(ctx, session, target, token.accessToken)
-	if err != nil && IsAuthFailure(err) {
-		// 只有明确的认证失败才刷新或重新登录，网络错误由 Registry 统一重试。
-		if token.refreshToken != "" || sub2APIUsesPassword(target.Credential) {
-			token, err = adapter.renewToken(ctx, session, target, token.refreshToken)
-			if err == nil {
-				me, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
-			}
-		}
-	}
+	token, me, err := adapter.resolveCurrentUser(ctx, session, target)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -70,11 +60,45 @@ func (adapter *sub2APIAdapter) Check(ctx context.Context, target TargetConfig) (
 	}
 	updatedCredential.TOTPCode = ""
 	snapshot.CredentialUpdate = &updatedCredential
+	if strings.TrimSpace(target.Credential.AdminKey) != "" || sub2APIUserIsAdmin(me) {
+		accounts, accountErr := adapter.readSub2APIAdminAccounts(ctx, session, target, token.accessToken)
+		if accountErr != nil {
+			// 号池读取是余额监控的可选增强；失败时保留钱包与轮换后的凭据，并明确标记需要关注。
+			snapshot.Status = TargetStatusWarning
+			snapshot.Message = "Sub2API 钱包可用，但号池暂时无法读取"
+		} else {
+			appendSub2APIAccountMetrics(&snapshot, target, accounts)
+		}
+	} else {
+		// 当前登录已经没有号池读取权限时显式清空旧账号，避免长期展示过期数据。
+		snapshot.Accounts = []AccountStatus{}
+	}
 	if !sub2APIUserEnabled(me) {
 		snapshot.Status = TargetStatusDisabled
 		snapshot.Message = "Sub2API 账号状态异常"
 	}
 	return snapshot, nil
+}
+
+// resolveCurrentUser 统一完成令牌解析、认证失败续期和当前用户读取。
+func (adapter *sub2APIAdapter) resolveCurrentUser(ctx context.Context, session *requestSession, target TargetConfig) (sub2APIToken, map[string]any, error) {
+	// 优先使用尚未过期的内存令牌，避免每轮检测都触发登录限流。
+	token, err := adapter.resolveToken(ctx, session, target)
+	if err != nil {
+		return sub2APIToken{}, nil, err
+	}
+	user, err := adapter.readCurrentUser(ctx, session, target, token.accessToken)
+	if err != nil && IsAuthFailure(err) && (token.refreshToken != "" || sub2APIUsesPassword(target.Credential)) {
+		// 只有明确的认证失败才刷新或重新登录，网络错误由 Registry 统一重试。
+		token, err = adapter.renewToken(ctx, session, target, token.refreshToken)
+		if err == nil {
+			user, err = adapter.readCurrentUser(ctx, session, target, token.accessToken)
+		}
+	}
+	if err != nil {
+		return sub2APIToken{}, nil, err
+	}
+	return token, user, nil
 }
 
 // ReadGroupMultipliers 合并 Sub2API 分组默认倍率与当前用户专属倍率。

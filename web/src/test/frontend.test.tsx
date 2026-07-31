@@ -80,6 +80,40 @@ describe('渠道向导', () => {
     expect(screen.getByText('支持 Linux.do、GitHub 等站点网页登录。')).toBeInTheDocument()
   })
 
+  it('Sub2API 登录步骤提供可选的管理员号池密钥', async () => {
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: 'Sub2 号池' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'sub2api' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://sub.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getByLabelText(/Admin API Key（读取号池）/)).toHaveValue('')
+    expect(screen.getByText(/使用管理员账号登录时可以不填；普通账号无法读取号池/)).toBeInTheDocument()
+  })
+
+  it('Sub2API 更换站点地址后清除尚未保存的管理员密钥', async () => {
+    renderWithClient(
+      <MemoryRouter initialEntries={['/targets/new']}>
+        <Routes><Route path="/targets/new" element={<TargetWizardPage />} /></Routes>
+      </MemoryRouter>
+    )
+    fireEvent.change(await screen.findByLabelText(/渠道名称/), { target: { value: 'Sub2 号池' } })
+    fireEvent.change(screen.getByLabelText('渠道类型'), { target: { value: 'sub2api' } })
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://sub.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.change(screen.getByLabelText(/Admin API Key（读取号池）/), { target: { value: 'first-site-secret' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '上一步' }))
+    fireEvent.change(screen.getByLabelText(/站点地址/), { target: { value: 'https://other.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+
+    expect(screen.getByLabelText(/Admin API Key（读取号池）/)).toHaveValue('')
+  })
+
   it('Sub2API 浏览器助手会读取当前地址并接管令牌', async () => {
     const waitingAttempt = {
       id: 'auth_0123456789abcdef0123456789abcdef',
@@ -817,6 +851,67 @@ describe('CLIProxyAPI 账号额度', () => {
     expect(screen.getByText('暂未获取')).toBeInTheDocument()
     expect(screen.getByText('剩余比例未知')).toBeInTheDocument()
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+})
+
+describe('Sub2API 号池详情', () => {
+  it('有管理员账号明细时显示可刷新额度号池', async () => {
+    const subTarget: Target = {
+      id: 'sub2-pool',
+      name: 'Sub2 号池',
+      kind: 'sub2api',
+      baseUrl: 'https://sub.example.com',
+      status: 'healthy',
+      statusText: '运行正常',
+      enabled: true,
+      checkIntervalMinutes: 5,
+      authConfigured: true,
+      metrics: [],
+      accounts: [{ id: 'sub-account', displayName: '订阅账号', provider: 'Anthropic', type: '共享', status: 'healthy' }]
+    }
+    const target = vi.spyOn(api, 'target').mockResolvedValue(subTarget)
+    const multiplierState = vi.spyOn(api, 'multiplierState').mockResolvedValue({
+      targetId: subTarget.id,
+      targetName: subTarget.name,
+      targetKind: 'sub2api',
+      enabled: false,
+      groups: []
+    })
+    const refresh = vi.spyOn(api, 'refreshTargetAccountQuotas').mockResolvedValue({
+      accounts: subTarget.accounts ?? [],
+      refreshedCount: 1,
+      unavailableCount: 0,
+      unsupportedCount: 0
+    })
+
+    renderWithClient(<MemoryRouter initialEntries={['/targets/sub2-pool']}><Routes><Route path="/targets/:id" element={<TargetDetailPage />} /></Routes></MemoryRouter>)
+
+    expect(await screen.findByRole('heading', { name: 'Sub2API 账号状态' })).toBeInTheDocument()
+    expect(screen.getByText('订阅账号')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '平台' })).toBeInTheDocument()
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith('sub2-pool', ['sub-account']))
+    target.mockRestore()
+    multiplierState.mockRestore()
+    refresh.mockRestore()
+  })
+
+  it('未读取到账号时说明管理员权限要求而不误报连接失败', async () => {
+    const subTarget: Target = {
+      id: 'sub2-empty', name: 'Sub2 普通账号', kind: 'sub2api', baseUrl: 'https://sub.example.com',
+      status: 'healthy', statusText: '运行正常', enabled: true, checkIntervalMinutes: 5,
+      authConfigured: true, metrics: [], accounts: []
+    }
+    const target = vi.spyOn(api, 'target').mockResolvedValue(subTarget)
+    const multiplierState = vi.spyOn(api, 'multiplierState').mockResolvedValue({
+      targetId: subTarget.id, targetName: subTarget.name, targetKind: 'sub2api', enabled: false, groups: []
+    })
+
+    renderWithClient(<MemoryRouter initialEntries={['/targets/sub2-empty']}><Routes><Route path="/targets/:id" element={<TargetDetailPage />} /></Routes></MemoryRouter>)
+
+    expect(await screen.findByText('需管理员账号或管理员 API Key；普通账号余额检测仍可正常使用。')).toBeInTheDocument()
+    expect(screen.queryByText(/连接失败/)).not.toBeInTheDocument()
+    target.mockRestore()
+    multiplierState.mockRestore()
   })
 })
 

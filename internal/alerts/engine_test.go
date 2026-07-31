@@ -293,10 +293,80 @@ func TestCLIProxyHealthSnapshotPreservesLastQuota(t *testing.T) {
 	if len(current) != 1 {
 		t.Fatalf("健康快照账号未生成：%#v", current)
 	}
-	mergeStoredCLIProxyAPIQuota(current, existing)
+	mergeStoredAccountQuota(current, existing)
 	if current[0].QuotaState != monitor.AccountQuotaStateAvailable || len(current[0].QuotaWindows) != 1 ||
 		current[0].QuotaWindows[0].RemainingPercent != "75" || current[0].Type != "plus" || current[0].SubscriptionExpiresAt == "" {
 		t.Fatalf("常规健康检测应保留上次额度：%#v", current[0])
+	}
+}
+
+func TestSub2APIAccountsAreIsolatedAndPreservePageQuota(t *testing.T) {
+	database, target := createTargetForTest(t, string(monitor.TargetKindSub2API))
+	defer database.Close()
+	engine := NewEngine(database, nil)
+	now := time.Now().UTC()
+	remaining, limit := decimal.RequireFromString("8.5"), decimal.NewFromInt(10)
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindSub2API, ObservedAt: now,
+		Accounts: []monitor.AccountStatus{{
+			ExternalID: "same-upstream-id", DisplayName: "user@example.com", Provider: "openai",
+			Status: string(monitor.TargetStatusHealthy), StatusText: "可用",
+		}},
+	}); err != nil {
+		t.Fatalf("保存 Sub2API 账号池失败: %v", err)
+	}
+	accounts, err := database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("读取 Sub2API 账号池失败：%#v, %v", accounts, err)
+	}
+	sub2PublicID := monitor.PublicAccountID(monitor.TargetKindSub2API, "same-upstream-id")
+	cliPublicID := monitor.PublicAccountID(monitor.TargetKindCLIProxyAPI, "same-upstream-id")
+	if accounts[0].ExternalID != sub2PublicID || accounts[0].ExternalID == cliPublicID || accounts[0].DisplayName == "user@example.com" {
+		t.Fatalf("Sub2API 账号标识未按渠道隔离或名称未脱敏：%#v", accounts[0])
+	}
+	if err := engine.SaveAccountQuotas(context.Background(), target, []monitor.AccountStatus{{
+		ExternalID: "same-upstream-id", QuotaState: monitor.AccountQuotaStateAvailable,
+		QuotaWindows: []monitor.AccountQuotaWindow{{
+			Key: "daily-usd", Label: "每日额度", RemainingValue: &remaining, LimitValue: &limit, Unit: "USD",
+		}},
+	}}); err != nil {
+		t.Fatalf("保存 Sub2API 当前页额度失败: %v", err)
+	}
+	// 常规检测未携带额度时，必须保留刚刚按页读取的额度。
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindSub2API, ObservedAt: now.Add(time.Minute),
+		Accounts: []monitor.AccountStatus{{
+			ExternalID: "same-upstream-id", DisplayName: "user@example.com", Provider: "openai",
+			Status: string(monitor.TargetStatusWarning), StatusText: "临时警告",
+		}},
+	}); err != nil {
+		t.Fatalf("更新 Sub2API 常规检测结果失败: %v", err)
+	}
+	accounts, err = database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil || len(accounts) != 1 || accounts[0].QuotaState != monitor.AccountQuotaStateAvailable ||
+		len(accounts[0].QuotaWindows) != 1 || accounts[0].QuotaWindows[0].RemainingValue != "8.5" ||
+		accounts[0].QuotaWindows[0].LimitValue != "10" || accounts[0].QuotaWindows[0].Unit != "USD" {
+		t.Fatalf("Sub2API 常规检测没有保留按页额度：%#v, %v", accounts, err)
+	}
+	if err := engine.HandleSuccess(context.Background(), target, monitor.Snapshot{
+		TargetID: target.ID, Kind: monitor.TargetKindSub2API, ObservedAt: now.Add(2 * time.Minute),
+		Status: monitor.TargetStatusWarning, Message: "钱包可用但号池读取失败", Accounts: nil,
+	}); err != nil {
+		t.Fatalf("保存 Sub2API 号池降级快照失败: %v", err)
+	}
+	accounts, err = database.ListChatAccounts(context.Background(), target.ID)
+	if err != nil || len(accounts) != 1 || len(accounts[0].QuotaWindows) != 1 {
+		t.Fatalf("号池读取失败时不应清空旧账号：%#v, %v", accounts, err)
+	}
+}
+
+func TestSub2APILegalAccountTypesAreNotTreatedAsSecrets(t *testing.T) {
+	accounts := sanitizedAccounts(string(monitor.TargetKindSub2API), "target-sub2", []monitor.AccountStatus{
+		{ExternalID: "api-key-account", Provider: "anthropic", Type: "apikey", Status: string(monitor.TargetStatusHealthy)},
+		{ExternalID: "setup-account", Provider: "anthropic", Type: "setup-token", Status: string(monitor.TargetStatusHealthy)},
+	}, time.Now().UTC())
+	if len(accounts) != 2 || accounts[0].Type != "apikey" || accounts[1].Type != "setup-token" {
+		t.Fatalf("合法 Sub2API 账号类型被误判为秘密：%#v", accounts)
 	}
 }
 

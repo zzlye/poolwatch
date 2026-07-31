@@ -72,24 +72,24 @@ func (registry *Registry) Run(ctx context.Context, target TargetInput) (Result, 
 }
 
 // RefreshAccountQuotas 将当前页账号额度刷新分派给对应的内置适配器。
-func (registry *Registry) RefreshAccountQuotas(ctx context.Context, target TargetInput, accountIDs []string) ([]AccountStatus, error) {
+func (registry *Registry) RefreshAccountQuotas(ctx context.Context, target TargetInput, accountIDs []string) (AccountQuotaRefreshResult, error) {
 	adapter, err := registry.Adapter(target.Kind)
 	if err != nil {
-		return nil, err
+		return AccountQuotaRefreshResult{}, err
 	}
 	refresher, ok := adapter.(AccountQuotaRefresher)
 	if !ok {
-		return nil, checkError(ErrorClassConfig, "刷新账号额度", "该渠道不支持账号额度刷新", 0, nil)
+		return AccountQuotaRefreshResult{}, checkError(ErrorClassConfig, "刷新账号额度", "该渠道不支持账号额度刷新", 0, nil)
 	}
-	var accounts []AccountStatus
+	var result AccountQuotaRefreshResult
 	for attempt := 0; attempt < 3; attempt++ {
-		accounts, err = refresher.RefreshAccountQuotas(ctx, target, accountIDs)
+		result, err = refresher.RefreshAccountQuotas(ctx, target, accountIDs)
 		if err == nil {
-			return accounts, nil
+			return result, nil
 		}
 		kind := ErrorClassOf(err)
 		if kind != ErrorClassNetwork && kind != ErrorClassServer {
-			return nil, err
+			return result, err
 		}
 		if attempt == 2 {
 			break
@@ -101,11 +101,11 @@ func (registry *Registry) RefreshAccountQuotas(ctx context.Context, target Targe
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return nil, ctx.Err()
+			return result, ctx.Err()
 		case <-timer.C:
 		}
 	}
-	return accounts, err
+	return result, err
 }
 
 // Probe 执行连接测试；自定义渠道会额外返回临时 JSON sample。

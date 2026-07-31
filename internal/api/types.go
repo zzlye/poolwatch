@@ -79,6 +79,9 @@ type accountQuotaWindowResponse struct {
 	Key              string `json:"key"`
 	Label            string `json:"label"`
 	RemainingPercent string `json:"remainingPercent,omitempty"`
+	RemainingValue   string `json:"remainingValue,omitempty"`
+	LimitValue       string `json:"limitValue,omitempty"`
+	Unit             string `json:"unit,omitempty"`
 	ResetAt          string `json:"resetAt,omitempty"`
 }
 

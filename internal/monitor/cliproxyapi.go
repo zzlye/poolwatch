@@ -44,13 +44,13 @@ func (adapter *cliProxyAPIAdapter) Check(ctx context.Context, target TargetConfi
 	if err := session.doJSON(ctx, http.MethodGet, endpoint, headers, nil, &payload); err != nil {
 		return Snapshot{}, err
 	}
-	accounts, _, err := parseCLIProxyAPIAccounts(payload, time.Now().UTC())
+	accounts, rawAccounts, err := parseCLIProxyAPIAccounts(payload, time.Now().UTC())
 	if err != nil {
 		return Snapshot{}, err
 	}
 	// 常规检测只读取账号健康状态；额度由详情页“刷新本页额度”按需读取。
 	for index := range accounts {
-		if !cliProxyAPIProviderHasQuotaEndpoint(normalizeCLIProxyAPIProvider(accounts[index].Provider)) {
+		if !cliProxyAPIAccountHasQuotaEndpoint(normalizeCLIProxyAPIProvider(accounts[index].Provider), rawAccounts[index]) {
 			accounts[index].QuotaState = AccountQuotaStateUnsupported
 		}
 	}
@@ -96,30 +96,30 @@ func cliProxyAPIAccountIsAvailable(account AccountStatus) bool {
 }
 
 // RefreshAccountQuotas 仅刷新前端当前页指定账号的额度，不修改账号健康状态。
-func (adapter *cliProxyAPIAdapter) RefreshAccountQuotas(ctx context.Context, target TargetConfig, accountIDs []string) ([]AccountStatus, error) {
+func (adapter *cliProxyAPIAdapter) RefreshAccountQuotas(ctx context.Context, target TargetConfig, accountIDs []string) (AccountQuotaRefreshResult, error) {
 	target = ensureTargetKind(target, adapter.Kind())
 	requested, err := normalizeCLIProxyAPIAccountIDs(accountIDs)
 	if err != nil {
-		return nil, err
+		return AccountQuotaRefreshResult{}, err
 	}
 	managementKey := strings.TrimSpace(target.Credential.AdminKey)
 	if managementKey == "" {
-		return nil, checkError(ErrorClassConfig, "刷新 CLIProxyAPI 额度", "CLIProxyAPI 需要管理密钥", 0, nil)
+		return AccountQuotaRefreshResult{}, checkError(ErrorClassConfig, "刷新 CLIProxyAPI 额度", "CLIProxyAPI 需要管理密钥", 0, nil)
 	}
 	endpoint, err := joinTargetURL(target.BaseURL, "/v0/management/auth-files")
 	if err != nil {
-		return nil, err
+		return AccountQuotaRefreshResult{}, err
 	}
 	headers := make(http.Header)
 	setBearer(headers, managementKey)
 	session := adapter.http.newSession(target.AllowPrivateNetwork)
 	var payload any
 	if err := session.doJSON(ctx, http.MethodGet, endpoint, headers, nil, &payload); err != nil {
-		return nil, err
+		return AccountQuotaRefreshResult{}, err
 	}
 	accounts, rawAccounts, err := parseCLIProxyAPIAccounts(payload, time.Now().UTC())
 	if err != nil {
-		return nil, err
+		return AccountQuotaRefreshResult{}, err
 	}
 
 	indexes := make(map[string]int, len(accounts))
@@ -134,13 +134,13 @@ func (adapter *cliProxyAPIAdapter) RefreshAccountQuotas(ctx context.Context, tar
 	for _, accountID := range requested {
 		index, exists := indexes[accountID]
 		if !exists {
-			return nil, checkError(ErrorClassResponse, "刷新 CLIProxyAPI 额度", "账号列表已经变化，请刷新页面后重试", 0, nil)
+			return AccountQuotaRefreshResult{}, checkError(ErrorClassResponse, "刷新 CLIProxyAPI 额度", "账号列表已经变化，请刷新页面后重试", 0, nil)
 		}
 		selectedAccounts = append(selectedAccounts, accounts[index])
 		selectedRaw = append(selectedRaw, rawAccounts[index])
 	}
 	adapter.refreshCLIProxyAPIAccounts(ctx, session, target, managementKey, selectedAccounts, selectedRaw)
-	return selectedAccounts, nil
+	return AccountQuotaRefreshResult{Accounts: selectedAccounts}, nil
 }
 
 func normalizeCLIProxyAPIAccountIDs(accountIDs []string) ([]string, error) {

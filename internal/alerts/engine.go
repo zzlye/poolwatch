@@ -88,14 +88,18 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	if err := e.store.InsertSnapshot(ctx, storedSnapshot); err != nil {
 		return err
 	}
-	if target.Kind == string(monitor.TargetKindChatGPT2API) || target.Kind == string(monitor.TargetKindCLIProxyAPI) {
+	supportsAccounts := target.Kind == string(monitor.TargetKindChatGPT2API) ||
+		target.Kind == string(monitor.TargetKindCLIProxyAPI) || target.Kind == string(monitor.TargetKindSub2API)
+	// Sub2API 钱包检测成功但可选号池读取失败时 Accounts 为 nil，必须保留上一次号池数据。
+	shouldReplaceAccounts := supportsAccounts && !(target.Kind == string(monitor.TargetKindSub2API) && snapshot.Accounts == nil)
+	if shouldReplaceAccounts {
 		accounts := sanitizedAccounts(target.Kind, target.ID, snapshot.Accounts, observedAt)
-		if target.Kind == string(monitor.TargetKindCLIProxyAPI) {
+		if target.Kind == string(monitor.TargetKindCLIProxyAPI) || target.Kind == string(monitor.TargetKindSub2API) {
 			existing, err := e.store.ListChatAccounts(ctx, target.ID)
 			if err != nil {
 				return err
 			}
-			mergeStoredCLIProxyAPIQuota(accounts, existing)
+			mergeStoredAccountQuota(accounts, existing)
 		}
 		if err := e.store.ReplaceChatAccounts(ctx, target.ID, accounts); err != nil {
 			return err
@@ -134,10 +138,10 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	return e.store.UpdateTargetCheck(ctx, target.ID, string(status), 0, "", observedAt)
 }
 
-// SaveAccountQuotas 只更新 CLIProxyAPI 账号的额度与套餐字段，不产生快照或告警。
+// SaveAccountQuotas 只更新支持号池的渠道账号额度与套餐字段，不产生快照或告警。
 func (e *Engine) SaveAccountQuotas(ctx context.Context, target store.Target, accounts []monitor.AccountStatus) error {
-	if target.Kind != string(monitor.TargetKindCLIProxyAPI) {
-		return errors.New("只有 CLIProxyAPI 渠道支持账号额度刷新")
+	if target.Kind != string(monitor.TargetKindCLIProxyAPI) && target.Kind != string(monitor.TargetKindSub2API) {
+		return errors.New("该渠道不支持账号额度刷新")
 	}
 	if len(accounts) == 0 {
 		return errors.New("没有可保存的账号额度")
@@ -311,7 +315,7 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 	result := make([]store.ChatAccount, 0, len(accounts))
 	for index, account := range accounts {
 		maskedEmail := maskEmail(account.Email)
-		// chatgpt2api 没有独立安全标识，继续要求有效邮箱；CLIProxyAPI 可使用仅内部可见的上游标识生成哈希。
+		// chatgpt2api 没有独立安全标识，继续要求有效邮箱；其他号池使用仅内部可见的上游标识生成分渠道哈希。
 		if targetKind == string(monitor.TargetKindChatGPT2API) && maskedEmail == "" {
 			continue
 		}
@@ -319,8 +323,8 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 		if maskedDisplayEmail := maskEmail(displayName); maskedDisplayEmail != "" {
 			displayName = maskedDisplayEmail
 		}
-		provider := sanitizeAccountText(account.Provider, 80)
-		accountType := sanitizeAccountText(account.Type, 80)
+		provider := sanitizeAccountIdentifier(account.Provider, 80)
+		accountType := sanitizeAccountIdentifier(account.Type, 80)
 		statusText := sanitizeAccountText(account.StatusText, 300)
 		recoveryAt := account.RecoveryAt
 		if recoveryAt == "" {
@@ -348,8 +352,29 @@ func sanitizedAccounts(targetKind, targetID string, accounts []monitor.AccountSt
 	return result
 }
 
-// mergeStoredCLIProxyAPIQuota 在常规健康检测时保留上一次按页读取的额度与套餐。
-func mergeStoredCLIProxyAPIQuota(current, existing []store.ChatAccount) {
+// sanitizeAccountIdentifier 只接收适配器已经筛选出的短枚举标识，避免把 apikey、setup-token 等合法类型误判为秘密。
+func sanitizeAccountIdentifier(value string, maximum int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || maximum <= 0 || len([]rune(value)) > maximum || looksLikeAccountSecret(value) {
+		return ""
+	}
+	normalized := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(value))
+	if normalized != "apikey" && normalized != "setuptoken" {
+		// 除两个官方账号类型外仍沿用通用秘密关键词防护。
+		return sanitizeAccountText(value, maximum)
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("-_.:/+ ", character) {
+			continue
+		}
+		return ""
+	}
+	return value
+}
+
+// mergeStoredAccountQuota 在常规健康检测时保留同一渠道上一次按页读取的额度与套餐。
+func mergeStoredAccountQuota(current, existing []store.ChatAccount) {
 	previous := make(map[string]store.ChatAccount, len(existing))
 	for _, account := range existing {
 		previous[account.ExternalID] = account
@@ -402,13 +427,32 @@ func sanitizeAccountQuotaWindows(windows []monitor.AccountQuotaWindow) []store.A
 			!window.RemainingPercent.GreaterThan(decimal.NewFromInt(100)) {
 			remaining = window.RemainingPercent.String()
 		}
+		remainingValue := sanitizeAccountQuotaValue(window.RemainingValue)
+		limitValue := sanitizeAccountQuotaValue(window.LimitValue)
+		unit := sanitizeAccountText(window.Unit, 40)
+		if remainingValue == "" && limitValue == "" {
+			unit = ""
+		}
 		resetAt := sanitizeAccountTimestamp(window.ResetAt)
-		if remaining == "" && resetAt == "" {
+		if remaining == "" && remainingValue == "" && limitValue == "" && resetAt == "" {
 			continue
 		}
 		result = append(result, store.AccountQuotaWindow{
-			Key: key, Label: label, RemainingPercent: remaining, ResetAt: resetAt,
+			Key: key, Label: label, RemainingPercent: remaining, RemainingValue: remainingValue,
+			LimitValue: limitValue, Unit: unit, ResetAt: resetAt,
 		})
+	}
+	return result
+}
+
+// sanitizeAccountQuotaValue 只接受非负且长度受控的十进制额度，避免持久化异常大数或非数值文本。
+func sanitizeAccountQuotaValue(value *decimal.Decimal) string {
+	if value == nil || value.IsNegative() {
+		return ""
+	}
+	result := value.String()
+	if len(result) > 80 {
+		return ""
 	}
 	return result
 }
