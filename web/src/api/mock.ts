@@ -263,6 +263,7 @@ function mockGroupPrices(target: Target, groupKey: string): GroupPriceResult {
   const selected = multiplierSelections.get(target.id) ?? new Set<string>()
   if (!group || !selected.has(groupKey)) throw new Error('该分组尚未选择监控，请先在渠道详情完成配置')
   const isSub2API = target.kind === 'sub2api'
+  const tokenPriceUnit = isSub2API ? 'USD/百万令牌' : 'CNY/百万令牌'
   return {
     targetId: target.id,
     groupKey: group.key,
@@ -274,9 +275,9 @@ function mockGroupPrices(target: Target, groupKey: string): GroupPriceResult {
         name: isSub2API ? 'claude-sonnet-4' : 'gpt-4.1',
         billingMode: 'token',
         prices: [
-          { key: 'input', label: '输入', value: isSub2API ? '3' : '2', unit: '元/百万 Token' },
-          { key: 'output', label: '输出', value: isSub2API ? '15' : '8', unit: '元/百万 Token' },
-          { key: 'cached', label: '缓存输入', value: isSub2API ? '0.3' : '0.5', unit: '元/百万 Token' }
+          { key: 'input', label: '输入', value: isSub2API ? '3' : '2', unit: tokenPriceUnit },
+          { key: 'output', label: '输出', value: isSub2API ? '15' : '8', unit: tokenPriceUnit },
+          { key: 'cached', label: '缓存输入', value: isSub2API ? '0.3' : '0.5', unit: tokenPriceUnit }
         ],
         note: '支持文本与工具调用'
       },
@@ -287,14 +288,14 @@ function mockGroupPrices(target: Target, groupKey: string): GroupPriceResult {
         intervals: [
           {
             label: '标准上下文', minTokens: '0', maxTokens: '200000', prices: [
-              { key: 'input', label: '输入', value: '1.25', unit: '元/百万 Token' },
-              { key: 'output', label: '输出', value: '10', unit: '元/百万 Token' }
+              { key: 'input', label: '输入', value: '1.25', unit: tokenPriceUnit },
+              { key: 'output', label: '输出', value: '10', unit: tokenPriceUnit }
             ]
           },
           {
             label: '长上下文', minTokens: '200001', prices: [
-              { key: 'input', label: '输入', value: '2.5', unit: '元/百万 Token' },
-              { key: 'output', label: '输出', value: '15', unit: '元/百万 Token' }
+              { key: 'input', label: '输入', value: '2.5', unit: tokenPriceUnit },
+              { key: 'output', label: '输出', value: '15', unit: tokenPriceUnit }
             ]
           }
         ]

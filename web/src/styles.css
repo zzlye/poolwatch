@@ -2891,23 +2891,19 @@ tbody tr:hover {
 }
 
 .group-price-table th:first-child {
-  width: 24%;
+  width: 22%;
 }
 
 .group-price-table th:nth-child(2) {
-  width: 17%;
+  width: 14%;
 }
 
 .group-price-table th:nth-child(3) {
-  width: 25%;
+  width: 22%;
 }
 
 .group-price-table th:nth-child(4) {
-  width: 17%;
-}
-
-.group-price-table th:nth-child(5) {
-  width: 17%;
+  width: 42%;
 }
 
 .group-price-table td {
@@ -2923,6 +2919,44 @@ tbody tr:hover {
   margin-top: 2px;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.group-price-items {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 7px;
+}
+
+.group-price-item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 7px 9px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.group-price-item span,
+.group-price-item small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.group-price-item strong {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.group-price-item small {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+.group-price-empty {
+  color: var(--text-secondary);
 }
 
 .spin {
@@ -3352,8 +3386,16 @@ tbody tr:hover {
   }
 
   .group-price-table td:first-child,
-  .group-price-table td:nth-child(3) {
+  .group-price-table td:last-child {
     grid-column: 1 / -1;
+  }
+
+  .group-price-items {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .group-price-item {
+    background: var(--surface);
   }
 
   .group-price-table td::before {

@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
-import { targetKindLabels, type GroupMultiplier, type GroupPriceModel, type MultiplierStatus, type Target, type TargetMultiplierState } from '../types'
+import { targetKindLabels, type GroupModelPrice, type GroupMultiplier, type GroupPriceModel, type MultiplierStatus, type Target, type TargetMultiplierState } from '../types'
 
 const statusLabels: Record<MultiplierStatus, string> = {
   stable: '稳定',
@@ -40,9 +40,7 @@ interface PriceRow {
   modelName: string
   billingMode: string
   range: string
-  priceLabel: string
-  value: string
-  unit: string
+  prices: GroupModelPrice[]
   note?: string
 }
 
@@ -78,34 +76,50 @@ function intervalText(label: string, minTokens?: string, maxTokens?: string, con
 
 function priceRows(models: GroupPriceModel[]): PriceRow[] {
   return models.flatMap((model, modelIndex) => {
-    const baseRows = model.prices.map((price, priceIndex) => ({
-      id: `${modelIndex}-base-${price.key}-${priceIndex}`,
+    const baseRows = model.prices.length ? [{
+      id: `${modelIndex}-base`,
       modelName: model.name,
       billingMode: billingModeLabel(model.billingMode),
       range: '通用价格',
-      priceLabel: price.label,
-      value: price.value,
-      unit: price.unit,
+      prices: sortPriceItems(model.prices),
       note: model.note
-    }))
-    const intervalRows = (model.intervals ?? []).flatMap((interval, intervalIndex) => interval.prices.map((price, priceIndex) => ({
-      id: `${modelIndex}-${intervalIndex}-${price.key}-${priceIndex}`,
+    }] : []
+    const intervalRows = (model.intervals ?? []).map((interval, intervalIndex) => ({
+      id: `${modelIndex}-${intervalIndex}`,
       modelName: model.name,
       billingMode: billingModeLabel(model.billingMode),
       range: intervalText(interval.label, interval.minTokens, interval.maxTokens, interval.condition),
-      priceLabel: price.label,
-      value: price.value,
-      unit: price.unit,
+      prices: sortPriceItems(interval.prices),
       note: model.note
-    })))
+    }))
     const rows = [...baseRows, ...intervalRows]
     if (rows.length) return rows
     // 动态计费模型可能只有渠道说明，没有可安全解析的固定价格，仍需保留模型信息。
     return [{
       id: `${modelIndex}-note`, modelName: model.name, billingMode: billingModeLabel(model.billingMode),
-      range: '动态或未公开', priceLabel: '渠道说明', value: '—', unit: '', note: model.note
+      range: '动态或未公开', prices: [], note: model.note
     }]
   })
+}
+
+function priceItemPriority(key: string): number {
+  // 核心 Token 价格固定排在最前，额外的图片、音频和按次价格保持渠道原始顺序。
+  switch (key.trim().toLocaleLowerCase()) {
+    case 'input': return 0
+    case 'output': return 1
+    case 'cache_read':
+    case 'cached': return 2
+    case 'cache_write': return 3
+    case 'cache_write_1h': return 4
+    default: return 100
+  }
+}
+
+function sortPriceItems(items: GroupModelPrice[]): GroupModelPrice[] {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => priceItemPriority(left.item.key) - priceItemPriority(right.item.key) || left.index - right.index)
+    .map(({ item }) => item)
 }
 
 function GroupPricePanel({ targetId, group, expanded }: { targetId: string; group: GroupMultiplier; expanded: boolean }) {
@@ -128,7 +142,8 @@ function GroupPricePanel({ targetId, group, expanded }: { targetId: string; grou
     const keyword = search.trim().toLocaleLowerCase()
     if (!keyword) return query.data?.models ?? []
     return (query.data?.models ?? []).filter((model) => {
-      const searchable = [model.name, billingModeLabel(model.billingMode), model.note, ...model.prices.map((price) => `${price.label} ${price.unit}`), ...(model.intervals ?? []).map((interval) => interval.label)].filter(Boolean).join(' ').toLocaleLowerCase()
+      const intervalTerms = (model.intervals ?? []).flatMap((interval) => [interval.label, interval.condition, ...interval.prices.map((price) => `${price.label} ${price.unit}`)])
+      const searchable = [model.name, billingModeLabel(model.billingMode), model.note, ...model.prices.map((price) => `${price.label} ${price.unit}`), ...intervalTerms].filter(Boolean).join(' ').toLocaleLowerCase()
       return searchable.includes(keyword)
     })
   }, [query.data?.models, search])
@@ -153,13 +168,12 @@ function GroupPricePanel({ targetId, group, expanded }: { targetId: string; grou
       {filteredModels.length === 0 ? <EmptyState title="没有匹配的模型" description={query.data.models.length ? '请调整搜索词。' : '该分组当前没有可展示的模型价格。'} /> : rows.length === 0 ? <EmptyState title="暂无价格项目" description="渠道返回了模型信息，但暂时没有具体价格项目。" /> : (
         <div className="table-wrap group-price-table-wrap">
           <table className="group-price-table">
-            <thead><tr><th scope="col">模型</th><th scope="col">计费方式</th><th scope="col">价格区间</th><th scope="col">价格项目</th><th scope="col">价格</th></tr></thead>
+            <thead><tr><th scope="col">模型</th><th scope="col">计费方式</th><th scope="col">价格区间</th><th scope="col">价格明细</th></tr></thead>
             <tbody>{rows.map((row) => <tr key={row.id}>
               <td data-label="模型"><strong>{row.modelName}</strong>{row.note ? <small>{row.note}</small> : null}</td>
               <td data-label="计费方式">{row.billingMode}</td>
               <td data-label="价格区间">{row.range}</td>
-              <td data-label="价格项目">{row.priceLabel}</td>
-              <td data-label="价格"><strong>{row.value}</strong> {row.unit}</td>
+              <td data-label="价格明细">{row.prices.length ? <div className="group-price-items">{row.prices.map((price, index) => <div className="group-price-item" key={`${price.key}-${index}`}><span>{price.label}</span><strong>{price.value}</strong><small>{price.unit}</small></div>)}</div> : <span className="group-price-empty">暂无固定价格</span>}</td>
             </tr>)}</tbody>
           </table>
         </div>

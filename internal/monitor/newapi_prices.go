@@ -50,6 +50,7 @@ func (adapter *newAPIAdapter) ReadGroupPrices(ctx context.Context, target Target
 	if err != nil {
 		return GroupPriceResult{}, err
 	}
+	priceDisplay := parseNewAPIQuotaDisplay(statusData)
 	if !cached {
 		headers, err = adapter.authenticate(ctx, session, target, statusData)
 		if err != nil {
@@ -81,7 +82,54 @@ func (adapter *newAPIAdapter) ReadGroupPrices(ctx context.Context, target Target
 	if err != nil {
 		return GroupPriceResult{}, err
 	}
+	if err := applyNewAPIPriceDisplay(&catalog, priceDisplay); err != nil {
+		return GroupPriceResult{}, groupPriceFailure("转换 New API 模型价格", "New API 模型价格货币换算失败", err)
+	}
 	return GroupPriceResult{Catalog: catalog}, nil
+}
+
+// applyNewAPIPriceDisplay 把内部统一计算的 USD 价格转换为站点公开的展示单位。
+// 价格页与余额页使用同一份公开配置，但这里的输入已经是 USD，不能再次除以 quota_per_unit。
+func applyNewAPIPriceDisplay(catalog *GroupPriceCatalog, display newAPIQuotaDisplay) error {
+	factor := decimal.NewFromInt(1)
+	unit := "USD"
+	switch display.displayType {
+	case "CNY", "CUSTOM":
+		factor = display.exchangeRate
+		unit = normalizeGroupPriceText(display.unit, 32)
+	case "TOKENS":
+		factor = display.quotaPerUnit
+		unit = "tokens"
+	}
+	if unit == "" {
+		unit = "USD"
+	}
+	for modelIndex := range catalog.Models {
+		if err := applyNewAPIPriceItems(catalog.Models[modelIndex].Prices, factor, unit); err != nil {
+			return err
+		}
+		for intervalIndex := range catalog.Models[modelIndex].Intervals {
+			if err := applyNewAPIPriceItems(catalog.Models[modelIndex].Intervals[intervalIndex].Prices, factor, unit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func applyNewAPIPriceItems(items []GroupPriceItem, factor decimal.Decimal, displayUnit string) error {
+	for index := range items {
+		value, err := multiplyPrice(items[index].Value, factor)
+		if err != nil {
+			return err
+		}
+		items[index].Value = value
+		// 适配器生成的价格单位均以 USD 开头，只替换货币部分并保留计量单位。
+		if strings.HasPrefix(items[index].Unit, "USD") {
+			items[index].Unit = displayUnit + strings.TrimPrefix(items[index].Unit, "USD")
+		}
+	}
+	return nil
 }
 
 func (adapter *newAPIAdapter) readNewAPIPriceCatalog(ctx context.Context, session *requestSession, target TargetConfig, headers http.Header, group GroupMultiplier) (GroupPriceCatalog, error) {

@@ -77,6 +77,86 @@ func TestNewAPI展示所选分组全部可靠价格并跳过损坏模型(t *test
 	assertPriceValues(t, byName["image-request"].Prices, map[string]string{"per_request": "0.02"})
 }
 
+func TestNewAPI分组价格跟随站点货币单位(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(writer http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(writer, map[string]any{"success": true, "data": map[string]any{
+			"quota_display_type": "CNY", "quota_per_unit": 500000, "usd_exchange_rate": "7",
+		}})
+	})
+	mux.HandleFunc("/api/user/self/groups", func(writer http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(writer, map[string]any{"success": true, "data": map[string]any{
+			"default": map[string]any{"ratio": "1", "desc": "默认分组"},
+		}})
+	})
+	mux.HandleFunc("/api/pricing", func(writer http.ResponseWriter, _ *http.Request) {
+		writeTestJSON(writer, map[string]any{"success": true, "data": []any{
+			map[string]any{
+				"model_name": "token-model", "quota_type": 0, "enable_groups": []string{"default"},
+				"model_ratio": "1", "completion_ratio": "2", "cache_ratio": "0.1",
+			},
+			map[string]any{
+				"model_name": "request-model", "quota_type": 1, "enable_groups": []string{"default"},
+				"model_price": "0.04",
+			},
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	adapter := newNewAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
+	result, err := adapter.ReadGroupPrices(context.Background(), TargetConfig{
+		ID: "new-cny-price", BaseURL: server.URL, AllowPrivateNetwork: true,
+		Credential: Credential{AccessToken: "manage-token", UserID: "42"},
+	}, "default")
+	if err != nil {
+		t.Fatalf("读取 CNY 价格失败：%v", err)
+	}
+	byName := make(map[string]GroupModelPrice)
+	for _, model := range result.Catalog.Models {
+		byName[model.Name] = model
+	}
+	assertPriceValues(t, byName["token-model"].Prices, map[string]string{
+		"input": "14", "output": "28", "cache_read": "1.4",
+	})
+	for _, item := range byName["token-model"].Prices {
+		if item.Unit != "CNY/百万令牌" {
+			t.Fatalf("Token 价格单位没有跟随站点货币：%#v", byName["token-model"].Prices)
+		}
+	}
+	requestPrice := byName["request-model"].Prices
+	if len(requestPrice) != 1 || requestPrice[0].Value.String() != "0.28" || requestPrice[0].Unit != "CNY/次" {
+		t.Fatalf("按次价格没有跟随站点货币：%#v", requestPrice)
+	}
+}
+
+func TestNewAPI价格单位转换覆盖站点显示模式(t *testing.T) {
+	tests := []struct {
+		name         string
+		display      newAPIQuotaDisplay
+		expected     string
+		expectedUnit string
+	}{
+		{name: "美元", display: newAPIQuotaDisplay{displayType: "USD", exchangeRate: decimalOne, quotaPerUnit: decimal.NewFromInt(500000), unit: "USD"}, expected: "2", expectedUnit: "USD/百万令牌"},
+		{name: "自定义货币", display: newAPIQuotaDisplay{displayType: "CUSTOM", exchangeRate: mustPriceDecimal(t, "0.034"), quotaPerUnit: decimal.NewFromInt(500000), unit: "HUHN"}, expected: "0.068", expectedUnit: "HUHN/百万令牌"},
+		{name: "额度令牌", display: newAPIQuotaDisplay{displayType: "TOKENS", exchangeRate: decimalOne, quotaPerUnit: decimal.NewFromInt(500000), unit: "tokens"}, expected: "1000000", expectedUnit: "tokens/百万令牌"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			catalog := GroupPriceCatalog{Models: []GroupModelPrice{{
+				Name: "test-model", Prices: []GroupPriceItem{{Key: "input", Label: "输入", Value: decimal.NewFromInt(2), Unit: "USD/百万令牌"}},
+			}}}
+			if err := applyNewAPIPriceDisplay(&catalog, test.display); err != nil {
+				t.Fatalf("转换站点价格失败：%v", err)
+			}
+			item := catalog.Models[0].Prices[0]
+			if item.Value.String() != test.expected || item.Unit != test.expectedUnit {
+				t.Fatalf("站点价格转换不正确：value=%s unit=%s", item.Value.String(), item.Unit)
+			}
+		})
+	}
+}
+
 func TestNewAPI严格解析阶梯价格但不执行请求规则(t *testing.T) {
 	row := map[string]any{
 		"quota_type": 0, "billing_mode": "tiered_expr",
@@ -204,6 +284,11 @@ func TestSub2API展示站点实际价格阶梯和图片价格(t *testing.T) {
 		"input": "1", "output": "2", "cache_write": "0.5", "cache_read": "0.25",
 		"cache_write_1h": "0.5", "image_input": "1.5", "image_output": "3",
 	})
+	for _, item := range token.Prices {
+		if !strings.HasPrefix(item.Unit, "USD/") {
+			t.Fatalf("Sub2API 官方价格应保持 USD：%#v", token.Prices)
+		}
+	}
 	if len(token.Intervals) != 1 || token.Intervals[0].MinTokens != "1" || token.Intervals[0].MaxTokens != "200000" {
 		t.Fatalf("Sub2API 阶梯边界不正确：%#v", token.Intervals)
 	}

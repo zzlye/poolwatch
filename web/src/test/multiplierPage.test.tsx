@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -96,6 +96,49 @@ describe('倍率折叠总览', () => {
     fireEvent.change(screen.getByRole('searchbox', { name: '搜索模型或计费方式' }), { target: { value: 'model-24' } })
     expect(await screen.findByText('显示第 1–1 个模型，共 1 个')).toBeInTheDocument()
     expect(screen.getByText('model-24')).toBeInTheDocument()
+  })
+
+  it('同一模型的 Token 价格合并展示且按次模型保持独立', async () => {
+    vi.spyOn(api, 'targets').mockResolvedValue(targets)
+    vi.spyOn(api, 'multiplierState').mockImplementation(async (id) => state(id))
+    vi.spyOn(api, 'groupPrices').mockResolvedValue({
+      ...prices(),
+      models: [
+        {
+          name: 'gpt-4.1',
+          billingMode: 'token',
+          prices: [
+            { key: 'input', label: '输入', value: '0.075', unit: 'CNY/百万令牌' },
+            { key: 'output', label: '输出', value: '0.45', unit: 'CNY/百万令牌' },
+            { key: 'cache_read', label: '缓存读取', value: '0.007499999999999999925', unit: 'CNY/百万令牌' },
+            { key: 'cache_write', label: '缓存写入', value: '0.1', unit: 'CNY/百万令牌' }
+          ]
+        },
+        {
+          name: 'image-request',
+          billingMode: 'per_request',
+          prices: [{ key: 'per_request', label: '按次', value: '0.28', unit: 'CNY/次' }]
+        }
+      ]
+    })
+
+    renderPage()
+
+    const tokenModelNames = await screen.findAllByText('gpt-4.1', { selector: 'strong' })
+    expect(tokenModelNames).toHaveLength(1)
+    const tokenRow = tokenModelNames[0].closest('tr')!
+    expect(within(tokenRow).getByText('输入')).toBeInTheDocument()
+    expect(within(tokenRow).getByText('输出')).toBeInTheDocument()
+    expect(within(tokenRow).getByText('缓存读取')).toBeInTheDocument()
+    expect(within(tokenRow).getByText('缓存写入')).toBeInTheDocument()
+    expect(within(tokenRow).getByText('0.007499999999999999925')).toBeInTheDocument()
+    expect(within(tokenRow).getAllByText('CNY/百万令牌')).toHaveLength(4)
+
+    const requestModelName = screen.getByText('image-request', { selector: 'strong' })
+    const requestRow = requestModelName.closest('tr')!
+    expect(within(requestRow).getByText('按次', { selector: '.group-price-item span' })).toBeInTheDocument()
+    expect(within(requestRow).getByText('0.28')).toBeInTheDocument()
+    expect(within(requestRow).getByText('CNY/次')).toBeInTheDocument()
   })
 
   it('渠道汇总区分待检测和检测失败，错误分组使用错误状态样式', async () => {
