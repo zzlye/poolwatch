@@ -49,3 +49,17 @@ func TestHandlerServesBrowserHelperPackage(t *testing.T) {
 		t.Fatalf("浏览器助手安装包响应不正确: %d, %q", response.Code, response.Body.String())
 	}
 }
+
+func TestServiceWorkerSupportsPromptUpdateActivation(t *testing.T) {
+	handler, err := NewHandler()
+	if err != nil {
+		t.Fatalf("创建前端处理器失败: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/sw.js", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	// 自定义 Service Worker 必须接收更新按钮发送的消息，否则新版本会一直停留在等待状态。
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "SKIP_WAITING") {
+		t.Fatalf("Service Worker 缺少立即启用新版本的消息处理: %d", response.Code)
+	}
+}

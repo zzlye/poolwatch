@@ -8,6 +8,13 @@ declare let self: ServiceWorkerGlobalScope & {
 cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
 
+// 更新按钮会向等待中的 Service Worker 发送此消息，收到后立即接管页面并完成版本切换。
+self.addEventListener('message', (event: ExtendableMessageEvent) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    event.waitUntil(self.skipWaiting())
+  }
+})
+
 // 只为页面导航提供离线应用壳，所有 API 与事件流都保持网络直连且绝不缓存。
 registerRoute(new NavigationRoute(createHandlerBoundToURL('/index.html'), {
   denylist: [/^\/api(?:\/|$)/]
