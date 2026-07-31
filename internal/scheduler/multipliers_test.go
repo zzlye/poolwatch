@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,18 @@ type multiplierRunner struct {
 	groupCalls      int
 	regularSnapshot monitor.Snapshot
 	regularError    error
+	priceResult     monitor.GroupPriceResult
+	priceError      error
+	priceGroupKey   string
+	priceCalls      int
+}
+
+func (runner *multiplierRunner) ReadGroupPrices(_ context.Context, _ monitor.TargetInput, groupKey string) (monitor.GroupPriceResult, error) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	runner.priceCalls++
+	runner.priceGroupKey = groupKey
+	return runner.priceResult, runner.priceError
 }
 
 func (runner *multiplierRunner) Run(_ context.Context, target monitor.TargetInput) (monitor.Result, error) {
@@ -112,6 +125,72 @@ func Test倍率选择建立基准且变化只通知一次(t *testing.T) {
 	alertsFound, err := database.ListAlerts(ctx, "all", 20)
 	if err != nil || len(alertsFound) != 1 || alertsFound[0].State != "resolved" {
 		t.Fatalf("倍率点事件保存错误：%#v，%v", alertsFound, err)
+	}
+}
+
+func Test分组价格只读已监控分组并保存续期凭据(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	rotated := monitor.Credential{AccessToken: "price-access", RefreshToken: "price-refresh"}
+	runner := &multiplierRunner{
+		groups: []monitor.GroupMultiplier{{Key: "default", Name: "默认组", Multiplier: decimal.NewFromInt(1)}},
+		priceResult: monitor.GroupPriceResult{
+			Catalog: monitor.GroupPriceCatalog{
+				GroupKey: "default", GroupName: "默认组", Multiplier: decimal.RequireFromString("0.25"),
+				Models: []monitor.GroupModelPrice{{Name: "gpt-price", BillingMode: "token"}},
+			},
+			CredentialUpdate: &rotated,
+		},
+	}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx := context.Background()
+	if _, err := service.ReadGroupPrices(ctx, target.ID, "default"); err == nil || !strings.Contains(err.Error(), "尚未加入") {
+		t.Fatalf("未监控分组不应读取价格：%v", err)
+	}
+	if runner.priceCalls != 0 {
+		t.Fatalf("未监控分组不应请求上游价格：%d", runner.priceCalls)
+	}
+	if _, err := service.SaveGroupMultiplierSelection(ctx, target.ID, []string{"default"}); err != nil {
+		t.Fatalf("建立倍率基准失败：%v", err)
+	}
+	catalog, err := service.ReadGroupPrices(ctx, target.ID, "default")
+	if err != nil || catalog.Multiplier.String() != "0.25" || runner.priceGroupKey != "default" {
+		t.Fatalf("读取当前上游价格失败，catalog=%#v err=%v", catalog, err)
+	}
+	stored, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("重新读取渠道失败：%v", err)
+	}
+	decrypted, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(decrypted), "price-refresh") {
+		t.Fatalf("价格读取轮换的凭据未持久化：%s，%v", decrypted, err)
+	}
+}
+
+func Test分组价格超时仍先保存续期凭据(t *testing.T) {
+	database, vault, target := schedulerFixture(t)
+	defer database.Close()
+	rotated := monitor.Credential{AccessToken: "timeout-access", RefreshToken: "timeout-refresh"}
+	runner := &multiplierRunner{
+		groups:      []monitor.GroupMultiplier{{Key: "default", Name: "默认组", Multiplier: decimal.NewFromInt(1)}},
+		priceResult: monitor.GroupPriceResult{CredentialUpdate: &rotated},
+		priceError:  context.DeadlineExceeded,
+	}
+	service := NewService(database, vault, runner, alerts.NewEngine(database, nil), false)
+	ctx := context.Background()
+	if _, err := service.SaveGroupMultiplierSelection(ctx, target.ID, []string{"default"}); err != nil {
+		t.Fatalf("建立倍率基准失败：%v", err)
+	}
+	if _, err := service.ReadGroupPrices(ctx, target.ID, "default"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("价格读取必须保留超时错误：%v", err)
+	}
+	stored, err := database.TargetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("重新读取渠道失败：%v", err)
+	}
+	plain, err := vault.Decrypt(stored.CredentialsEnc)
+	if err != nil || !strings.Contains(string(plain), "timeout-refresh") {
+		t.Fatalf("超时前轮换的价格凭据未持久化：%s，%v", plain, err)
 	}
 }
 

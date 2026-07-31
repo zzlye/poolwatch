@@ -137,6 +137,38 @@ type targetMultiplierStateResponse struct {
 	LastError     string                    `json:"lastError,omitempty"`
 }
 
+type groupPriceItemResponse struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Unit  string `json:"unit"`
+}
+
+type groupPriceIntervalResponse struct {
+	Label     string                   `json:"label"`
+	Condition string                   `json:"condition,omitempty"`
+	MinTokens string                   `json:"minTokens,omitempty"`
+	MaxTokens string                   `json:"maxTokens,omitempty"`
+	Prices    []groupPriceItemResponse `json:"prices"`
+}
+
+type groupModelPriceResponse struct {
+	Name        string                       `json:"name"`
+	BillingMode string                       `json:"billingMode"`
+	Prices      []groupPriceItemResponse     `json:"prices"`
+	Intervals   []groupPriceIntervalResponse `json:"intervals,omitempty"`
+	Note        string                       `json:"note,omitempty"`
+}
+
+type targetGroupPriceResponse struct {
+	TargetID   string                    `json:"targetId"`
+	GroupKey   string                    `json:"groupKey"`
+	GroupName  string                    `json:"groupName"`
+	Multiplier string                    `json:"multiplier"`
+	Models     []groupModelPriceResponse `json:"models"`
+	Notice     string                    `json:"notice,omitempty"`
+}
+
 type targetResponse struct {
 	ID                   string            `json:"id"`
 	Name                 string            `json:"name"`

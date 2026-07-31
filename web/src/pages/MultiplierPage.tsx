@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BellRing, CheckCircle2, CircleOff, Clock3, Percent, RefreshCw, Save, Search, SquareCheckBig } from 'lucide-react'
+import { AlertCircle, BellRing, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleOff, Clock3, RefreshCw, Search } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
-import { targetKindLabels, type GroupMultiplier, type MultiplierStatus, type TargetMultiplierState } from '../types'
+import { targetKindLabels, type GroupMultiplier, type GroupPriceModel, type MultiplierStatus, type Target, type TargetMultiplierState } from '../types'
 
 const statusLabels: Record<MultiplierStatus, string> = {
   stable: '稳定',
@@ -21,244 +21,273 @@ const statusIcons = {
   unknown: Clock3
 }
 
+function multiplierText(value: string): string {
+  // 服务端返回的十进制字符串需要原样展示，避免浏览器浮点转换损失精度。
+  return value ? `${value}×` : '等待建立基准'
+}
+
+function monitoredState(state: TargetMultiplierState): TargetMultiplierState {
+  return { ...state, groups: state.groups.filter((group) => group.monitored) }
+}
+
 function groupStatusLabel(group: GroupMultiplier): string {
-  if (!group.monitored) return '未监控'
   if (group.lastError) return '检测失败'
   return statusLabels[group.status]
 }
 
-function multiplierText(value: string): string {
-  // 倍率直接展示服务端十进制字符串，不能转成 JavaScript 浮点数。
-  return value ? `${value}×` : '等待建立基准'
+interface PriceRow {
+  id: string
+  modelName: string
+  billingMode: string
+  range: string
+  priceLabel: string
+  value: string
+  unit: string
+  note?: string
 }
 
-function selectionChanged(selectedKeys: Set<string>, groups: GroupMultiplier[]): boolean {
-  const monitoredKeys = groups.filter((group) => group.monitored).map((group) => group.key)
-  return selectedKeys.size !== monitoredKeys.length || monitoredKeys.some((key) => !selectedKeys.has(key))
+function billingModeLabel(value: string): string {
+  switch (value.trim().toLocaleLowerCase()) {
+    case 'token':
+    case 'per_token':
+    case 'tokens':
+      return '按 Token'
+    case 'request':
+    case 'per_request':
+      return '按次'
+    case 'image':
+    case 'per_image':
+      return '按图片'
+    case 'tiered':
+    case 'interval':
+      return '阶梯计费'
+    case 'dynamic':
+      return '动态计费'
+    default:
+      return '其他计费'
+  }
+}
+
+function intervalText(label: string, minTokens?: string, maxTokens?: string, condition?: string): string {
+  // 优先展示服务端安全解析后的条件；图片档位没有 Token 边界时只显示渠道给出的名称。
+  if (condition) return `${label}（${condition}）`
+  if (!minTokens && !maxTokens) return label
+  if (!minTokens) return `${label}（≤ ${maxTokens} tokens）`
+  return maxTokens ? `${label}（${minTokens}–${maxTokens} tokens）` : `${label}（≥ ${minTokens} tokens）`
+}
+
+function priceRows(models: GroupPriceModel[]): PriceRow[] {
+  return models.flatMap((model, modelIndex) => {
+    const baseRows = model.prices.map((price, priceIndex) => ({
+      id: `${modelIndex}-base-${price.key}-${priceIndex}`,
+      modelName: model.name,
+      billingMode: billingModeLabel(model.billingMode),
+      range: '通用价格',
+      priceLabel: price.label,
+      value: price.value,
+      unit: price.unit,
+      note: model.note
+    }))
+    const intervalRows = (model.intervals ?? []).flatMap((interval, intervalIndex) => interval.prices.map((price, priceIndex) => ({
+      id: `${modelIndex}-${intervalIndex}-${price.key}-${priceIndex}`,
+      modelName: model.name,
+      billingMode: billingModeLabel(model.billingMode),
+      range: intervalText(interval.label, interval.minTokens, interval.maxTokens, interval.condition),
+      priceLabel: price.label,
+      value: price.value,
+      unit: price.unit,
+      note: model.note
+    })))
+    const rows = [...baseRows, ...intervalRows]
+    if (rows.length) return rows
+    // 动态计费模型可能只有渠道说明，没有可安全解析的固定价格，仍需保留模型信息。
+    return [{
+      id: `${modelIndex}-note`, modelName: model.name, billingMode: billingModeLabel(model.billingMode),
+      range: '动态或未公开', priceLabel: '渠道说明', value: '—', unit: '', note: model.note
+    }]
+  })
+}
+
+function GroupPricePanel({ targetId, group, expanded }: { targetId: string; group: GroupMultiplier; expanded: boolean }) {
+  const [search, setSearch] = useState('')
+  const [pageSize, setPageSize] = useState(20)
+  const [requestedPage, setRequestedPage] = useState(1)
+  const headingId = `group-price-title-${encodeURIComponent(targetId)}-${encodeURIComponent(group.key)}`
+  const query = useQuery({
+    queryKey: ['group-prices', targetId, group.key],
+    queryFn: () => api.groupPrices(targetId, group.key),
+    enabled: expanded
+  })
+
+  useEffect(() => {
+    setSearch('')
+    setRequestedPage(1)
+  }, [group.key])
+
+  const filteredModels = useMemo(() => {
+    const keyword = search.trim().toLocaleLowerCase()
+    if (!keyword) return query.data?.models ?? []
+    return (query.data?.models ?? []).filter((model) => {
+      const searchable = [model.name, billingModeLabel(model.billingMode), model.note, ...model.prices.map((price) => `${price.label} ${price.unit}`), ...(model.intervals ?? []).map((interval) => interval.label)].filter(Boolean).join(' ').toLocaleLowerCase()
+      return searchable.includes(keyword)
+    })
+  }, [query.data?.models, search])
+  const totalPages = Math.max(1, Math.ceil(filteredModels.length / pageSize))
+  const currentPage = Math.min(requestedPage, totalPages)
+  const startIndex = (currentPage - 1) * pageSize
+  const pagedModels = filteredModels.slice(startIndex, startIndex + pageSize)
+  const rows = useMemo(() => priceRows(pagedModels), [pagedModels])
+  const lastVisible = filteredModels.length ? Math.min(startIndex + pageSize, filteredModels.length) : 0
+
+  if (query.isPending) return <LoadingView label={`正在读取 ${group.name} 的模型价格`} />
+  if (query.isError) return <ErrorView message={query.error.message} onRetry={() => void query.refetch()} />
+  if (!query.data) return null
+
+  return (
+    <section className="group-price-panel" aria-labelledby={headingId}>
+      <div className="group-price-heading">
+        <div><h3 id={headingId}>{query.data.groupName}模型价格</h3><p>分组倍率 {multiplierText(query.data.multiplier)} · 价格仅展示，不参与告警。</p></div>
+        <label className="search-field group-price-search"><span className="sr-only">搜索模型或计费方式</span><Search aria-hidden="true" size={18} /><input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setRequestedPage(1) }} placeholder="搜索模型或计费方式" /></label>
+      </div>
+      {query.data.notice ? <InlineMessage>{query.data.notice}</InlineMessage> : null}
+      {filteredModels.length === 0 ? <EmptyState title="没有匹配的模型" description={query.data.models.length ? '请调整搜索词。' : '该分组当前没有可展示的模型价格。'} /> : rows.length === 0 ? <EmptyState title="暂无价格项目" description="渠道返回了模型信息，但暂时没有具体价格项目。" /> : (
+        <div className="table-wrap group-price-table-wrap">
+          <table className="group-price-table">
+            <thead><tr><th scope="col">模型</th><th scope="col">计费方式</th><th scope="col">价格区间</th><th scope="col">价格项目</th><th scope="col">价格</th></tr></thead>
+            <tbody>{rows.map((row) => <tr key={row.id}>
+              <td data-label="模型"><strong>{row.modelName}</strong>{row.note ? <small>{row.note}</small> : null}</td>
+              <td data-label="计费方式">{row.billingMode}</td>
+              <td data-label="价格区间">{row.range}</td>
+              <td data-label="价格项目">{row.priceLabel}</td>
+              <td data-label="价格"><strong>{row.value}</strong> {row.unit}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      )}
+      {filteredModels.length > 0 ? <nav className="account-pagination group-price-pagination" aria-label={`${group.name}模型价格分页`}>
+        <p className="account-page-summary" aria-live="polite"><span>显示第 {startIndex + 1}–{lastVisible} 个模型，共 {filteredModels.length} 个</span></p>
+        <label className="compact-field account-page-size"><span>每页模型</span><select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setRequestedPage(1) }}><option value={20}>20 个/页</option><option value={50}>50 个/页</option><option value={100}>100 个/页</option></select></label>
+        <div className="account-page-buttons">
+          <button className="icon-button" type="button" aria-label="上一页模型" disabled={currentPage <= 1} onClick={() => setRequestedPage((page) => Math.max(1, page - 1))}><ChevronLeft aria-hidden="true" size={18} /></button>
+          <span>第 {currentPage} / {totalPages} 页</span>
+          <button className="icon-button" type="button" aria-label="下一页模型" disabled={currentPage >= totalPages} onClick={() => setRequestedPage((page) => Math.min(totalPages, page + 1))}><ChevronRight aria-hidden="true" size={18} /></button>
+        </div>
+      </nav> : null}
+    </section>
+  )
+}
+
+function MultiplierChannelDetails({ target, expanded, onToggle }: { target: Target; expanded: boolean; onToggle: (open: boolean) => void }) {
+  const queryClient = useQueryClient()
+  const [selectedGroupKey, setSelectedGroupKey] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
+  const query = useQuery({
+    queryKey: ['group-multipliers', target.id],
+    queryFn: () => api.multiplierState(target.id)
+  })
+  const groups = useMemo(() => (query.data?.groups ?? []).filter((group) => group.monitored), [query.data?.groups])
+
+  useEffect(() => {
+    if (groups.some((group) => group.key === selectedGroupKey)) return
+    setSelectedGroupKey(groups[0]?.key ?? '')
+  }, [groups, selectedGroupKey])
+
+  const refreshMutation = useMutation({
+    mutationFn: () => api.checkMultiplierGroups(target.id),
+    onSuccess: (result) => {
+      queryClient.setQueryData(['group-multipliers', target.id], monitoredState(result))
+      void queryClient.invalidateQueries({ queryKey: ['group-prices', target.id] })
+      void queryClient.invalidateQueries({ queryKey: ['alerts'] })
+      setSuccessMessage('当前渠道倍率已经刷新。')
+    }
+  })
+  const selectedGroup = groups.find((group) => group.key === selectedGroupKey)
+  const summaryStatus = query.isPending
+    ? { label: '正在读取', className: 'is-loading', icon: Clock3 }
+    : query.isError
+      ? { label: '读取失败', className: 'is-error', icon: AlertCircle }
+      : groups.length === 0
+        ? { label: '未配置', className: 'is-unconfigured', icon: CircleOff }
+        : query.data?.lastError || groups.some((group) => group.lastError || group.status === 'missing')
+          ? { label: '检测失败', className: 'is-error', icon: AlertCircle }
+          : groups.some((group) => group.status === 'changed')
+            ? { label: '有变化', className: 'is-changed', icon: BellRing }
+            : groups.some((group) => group.status === 'unknown')
+              ? { label: '待检测', className: 'is-loading', icon: Clock3 }
+              : { label: '稳定', className: 'is-stable', icon: CheckCircle2 }
+  const SummaryStatusIcon = summaryStatus.icon
+
+  return (
+    <details className="multiplier-channel-details" id={`multiplier-channel-${encodeURIComponent(target.id)}`} open={expanded} onToggle={(event) => onToggle(event.currentTarget.open)}>
+      <summary>
+        <span className="multiplier-channel-identity"><strong>{target.name}</strong><small>{targetKindLabels[target.kind]} · {target.enabled ? '定时检测中' : '已暂停'}</small></span>
+        <span className={`multiplier-channel-stat multiplier-channel-health ${summaryStatus.className}`}><small>倍率状态</small><b><SummaryStatusIcon aria-hidden="true" size={16} />{summaryStatus.label}</b></span>
+        <span className="multiplier-channel-stat"><small>已选分组</small><b>{groups.length} 个</b></span>
+        <span className="multiplier-channel-stat multiplier-channel-checked"><small>最近检测</small><b>{query.data?.lastCheckedAt ? formatRelativeTime(query.data.lastCheckedAt) : '暂无记录'}</b></span>
+        <ChevronDown className="multiplier-disclosure-icon" aria-hidden="true" size={20} />
+      </summary>
+      <div className="multiplier-channel-content">
+        {query.isPending ? <LoadingView label="正在读取倍率监控" /> : null}
+        {query.isError && !query.data ? <ErrorView message={query.error.message} onRetry={() => void query.refetch()} /> : null}
+        {query.isError && query.data ? <InlineMessage tone="warning">倍率状态重新读取失败，当前显示的是上一次结果。<button className="button ghost compact" type="button" onClick={() => void query.refetch()}>重新读取</button></InlineMessage> : null}
+        {query.data?.lastError ? <InlineMessage tone="warning"><AlertCircle aria-hidden="true" size={17} />最近一次倍率检测失败：{query.data.lastError}</InlineMessage> : null}
+        {refreshMutation.isError ? <InlineMessage tone="danger">刷新失败：{refreshMutation.error.message}</InlineMessage> : null}
+        {successMessage ? <InlineMessage tone="success">{successMessage}</InlineMessage> : null}
+
+        {query.data ? <>
+          <div className="multiplier-channel-toolbar">
+            <span>{query.data.lastCheckedAt ? <>最近检测：<time dateTime={query.data.lastCheckedAt} title={formatDateTime(query.data.lastCheckedAt)}>{formatRelativeTime(query.data.lastCheckedAt)}</time></> : '尚未完成倍率检测'}</span>
+            <div className="compact-actions"><Link className="button ghost compact" to={`/targets/${target.id}#multiplier-settings`}>配置分组</Link><button className="button secondary compact" type="button" disabled={!target.authConfigured || groups.length === 0 || refreshMutation.isPending} onClick={() => { setSuccessMessage(''); refreshMutation.mutate() }}><RefreshCw className={refreshMutation.isPending ? 'spin' : ''} aria-hidden="true" size={17} />{refreshMutation.isPending ? '刷新中' : '刷新倍率'}</button></div>
+          </div>
+          {groups.length === 0 ? <EmptyState title="尚未配置倍率监控" description="进入渠道详情自动检测分组，并选择需要监控的分组。" action={<Link className="button primary" to={`/targets/${target.id}#multiplier-settings`}>去配置分组</Link>} /> : <>
+            <div className="multiplier-group-picker" role="group" aria-label={`${target.name}已监控分组`}>
+              {groups.map((group) => {
+                const displayStatus = group.lastError ? 'error' : group.status
+                const StatusIcon = group.lastError ? AlertCircle : statusIcons[group.status]
+                const selected = group.key === selectedGroupKey
+                return <button key={group.key} className={selected ? 'multiplier-group-option selected' : 'multiplier-group-option'} type="button" aria-pressed={selected} onClick={() => setSelectedGroupKey(group.key)}>
+                  <span><strong>{group.name}</strong><small>{group.description || `标识：${group.key}`}</small></span><span className={`multiplier-group-option-value state-${displayStatus}`}><b>{multiplierText(group.multiplier)}</b><small><StatusIcon aria-hidden="true" size={15} />{groupStatusLabel(group)}</small></span>
+                </button>
+              })}
+            </div>
+            {selectedGroup ? <GroupPricePanel targetId={target.id} group={selectedGroup} expanded={expanded} /> : null}
+          </>}
+        </> : null}
+      </div>
+    </details>
+  )
 }
 
 export default function MultiplierPage() {
-  const queryClient = useQueryClient()
-  const [params, setParams] = useSearchParams()
+  const [params] = useSearchParams()
   const requestedTargetId = params.get('target') ?? ''
-  const [targetId, setTargetId] = useState(requestedTargetId)
-  const targetIdRef = useRef(targetId)
-  const approvedTargetIdRef = useRef<string | null>(null)
-  const [detectedState, setDetectedState] = useState<TargetMultiplierState | null>(null)
-  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
-  const [dirty, setDirty] = useState(false)
-  const [successMessage, setSuccessMessage] = useState('')
-
+  const [expandedTargets, setExpandedTargets] = useState<Set<string>>(() => new Set(requestedTargetId ? [requestedTargetId] : []))
   const targetsQuery = useQuery({ queryKey: ['targets'], queryFn: api.targets })
-  const eligibleTargets = useMemo(
-    () => (targetsQuery.data ?? []).filter((target) => target.kind === 'new_api' || target.kind === 'sub2api'),
-    [targetsQuery.data]
-  )
-  const selectedTarget = eligibleTargets.find((target) => target.id === targetId)
-  const stateQuery = useQuery({
-    queryKey: ['group-multipliers', targetId],
-    queryFn: () => api.multiplierState(targetId),
-    enabled: Boolean(targetId && selectedTarget)
-  })
+  const eligibleTargets = useMemo(() => (targetsQuery.data ?? []).filter((target) => target.kind === 'new_api' || target.kind === 'sub2api'), [targetsQuery.data])
 
   useEffect(() => {
-    targetIdRef.current = targetId
-  }, [targetId])
-
-  useEffect(() => {
-    const stored = stateQuery.data
-    if (!stored || dirty) return
-    if (detectedState?.targetId === targetId) {
-      const storedByKey = new Map(stored.groups.map((group) => [group.key, group]))
-      const mergedGroups = detectedState.groups.map((group) => {
-        const latest = storedByKey.get(group.key)
-        if (latest) {
-          storedByKey.delete(group.key)
-          return latest
-        }
-        return group.monitored ? { ...group, monitored: false, status: 'unknown' as const, lastError: undefined } : group
-      })
-      mergedGroups.push(...storedByKey.values())
-      const merged = { ...detectedState, ...stored, groups: mergedGroups }
-      setDetectedState(merged)
-      setSelectedKeys(new Set(merged.groups.filter((group) => group.monitored).map((group) => group.key)))
-      return
-    }
-    setSelectedKeys(new Set(stored.groups.filter((group) => group.monitored).map((group) => group.key)))
-    setDirty(false)
-  }, [dirty, stateQuery.dataUpdatedAt, targetId])
-
-  const applyResult = (result: TargetMultiplierState, message: string) => {
-    queryClient.setQueryData(['group-multipliers', result.targetId], result)
-    void queryClient.invalidateQueries({ queryKey: ['alerts'] })
-    void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-    // 请求结束前若路由已经切换，只更新原渠道缓存，不能覆盖新渠道表单。
-    if (result.targetId !== targetIdRef.current) return
-    setDetectedState(result)
-    setSelectedKeys(new Set(result.groups.filter((group) => group.monitored).map((group) => group.key)))
-    setDirty(false)
-    setSuccessMessage(message)
-  }
-
-  const detectMutation = useMutation({
-    mutationFn: api.detectMultiplierGroups,
-    onSuccess: (result) => applyResult(result, `已检测到 ${result.groups.length} 个固定倍率分组。`)
-  })
-  const checkMutation = useMutation({
-    mutationFn: api.checkMultiplierGroups,
-    onSuccess: (result) => applyResult(result, '当前渠道倍率已经刷新。')
-  })
-  const saveMutation = useMutation({
-    mutationFn: ({ id, keys }: { id: string; keys: string[] }) => api.saveMultiplierGroups(id, keys),
-    onSuccess: (result, variables) => applyResult(result, variables.keys.length ? `已监控 ${variables.keys.length} 个分组，首次倍率已作为基准。` : '已取消当前渠道的全部倍率监控。')
-  })
-
-  const clearOperationMessages = () => {
-    setSuccessMessage('')
-    detectMutation.reset()
-    checkMutation.reset()
-    saveMutation.reset()
-  }
-
-  const viewState = detectedState?.targetId === targetId ? detectedState : stateQuery.data
-  const groups = viewState?.groups ?? []
-  const monitoredCount = groups.filter((group) => group.monitored).length
-  const operationPending = detectMutation.isPending || checkMutation.isPending || saveMutation.isPending
-  const operationError = detectMutation.error ?? checkMutation.error ?? saveMutation.error
-
-  const resetTargetState = (nextTargetId: string) => {
-    targetIdRef.current = nextTargetId
-    setTargetId(nextTargetId)
-    setDetectedState(null)
-    setSelectedKeys(new Set())
-    setDirty(false)
-    setSuccessMessage('')
-    detectMutation.reset()
-    checkMutation.reset()
-    saveMutation.reset()
-  }
-
-  useEffect(() => {
-    if (targetsQuery.isPending) return
-    const requestedExists = eligibleTargets.some((target) => target.id === requestedTargetId)
-    const nextTargetId = requestedExists ? requestedTargetId : (eligibleTargets[0]?.id ?? '')
-    if (nextTargetId === targetId) {
-      if (requestedTargetId !== nextTargetId) {
-        setParams(nextTargetId ? { target: nextTargetId } : {}, { replace: true })
-      }
-      return
-    }
-    if (operationPending) {
-      setParams(targetId ? { target: targetId } : {}, { replace: true })
-      return
-    }
-    const switchAlreadyApproved = approvedTargetIdRef.current === nextTargetId
-    if (dirty && targetId && !switchAlreadyApproved && !window.confirm('当前分组选择尚未保存，确定切换渠道吗？')) {
-      setParams({ target: targetId }, { replace: true })
-      return
-    }
-    approvedTargetIdRef.current = null
-    resetTargetState(nextTargetId)
-    if (requestedTargetId !== nextTargetId) {
-      setParams(nextTargetId ? { target: nextTargetId } : {}, { replace: true })
-    }
-  }, [dirty, eligibleTargets, operationPending, requestedTargetId, targetId, targetsQuery.isPending])
-
-  const changeTarget = (nextTargetId: string) => {
-    if (operationPending) return
-    if (dirty && !window.confirm('当前分组选择尚未保存，确定切换渠道吗？')) return
-    // 先修改地址栏，再由同步副作用统一清理旧渠道状态，避免两个状态源互相回退。
-    approvedTargetIdRef.current = nextTargetId
-    setParams(nextTargetId ? { target: nextTargetId } : {}, { replace: true })
-  }
-
-  const toggleGroup = (key: string) => {
-    const next = new Set(selectedKeys)
-    if (next.has(key)) next.delete(key)
-    else next.add(key)
-    setSelectedKeys(next)
-    setDirty(selectionChanged(next, groups))
-    setSuccessMessage('')
-  }
-
-  const selectAll = (selected: boolean) => {
-    const next = selected ? new Set(groups.filter((group) => group.status !== 'missing' || group.monitored).map((group) => group.key)) : new Set<string>()
-    setSelectedKeys(next)
-    setDirty(selectionChanged(next, groups))
-    setSuccessMessage('')
-  }
-
-  const saveSelection = () => {
-    if (!targetId) return
-    if (selectedKeys.size === 0 && monitoredCount > 0 && !window.confirm('确定取消这个渠道的全部倍率监控吗？取消后重新添加会建立新的基准。')) return
-    clearOperationMessages()
-    saveMutation.mutate({ id: targetId, keys: [...selectedKeys] })
-  }
+    if (!requestedTargetId || !eligibleTargets.some((target) => target.id === requestedTargetId)) return
+    setExpandedTargets((current) => current.has(requestedTargetId) ? current : new Set([...current, requestedTargetId]))
+    const frame = window.requestAnimationFrame(() => document.getElementById(`multiplier-channel-${encodeURIComponent(requestedTargetId)}`)?.scrollIntoView?.({ block: 'nearest' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [eligibleTargets, requestedTargetId])
 
   if (targetsQuery.isPending) return <LoadingView label="正在读取可监控渠道" />
   if (targetsQuery.isError) return <ErrorView message={targetsQuery.error.message} onRetry={() => void targetsQuery.refetch()} />
 
   return (
     <div className="page-stack multiplier-page">
-      <PageHeader title="分组倍率" description="选择已添加的 New API 或 Sub2API 渠道，倍率发生变化时使用现有通知方式提醒。" />
-
-      {eligibleTargets.length === 0 ? (
-        <EmptyState title="还没有可监控的渠道" description="先添加 New API 或 Sub2API 渠道并配置登录信息。" action={<Link className="button primary" to="/targets/new">添加渠道</Link>} />
-      ) : (
-        <>
-          <section className="content-section multiplier-control-panel" aria-labelledby="multiplier-channel-title">
-            <div className="section-heading-row">
-              <div><h2 id="multiplier-channel-title">选择渠道</h2><p>只会读取当前选中渠道，不会扫描其他站点。</p></div>
-              {selectedTarget ? <span className="multiplier-kind">{targetKindLabels[selectedTarget.kind]}</span> : null}
-            </div>
-            <div className="multiplier-channel-actions">
-              <label className="field multiplier-channel-select"><span>已经添加的渠道</span><select value={targetId} disabled={operationPending} onChange={(event) => changeTarget(event.target.value)}>{eligibleTargets.map((target) => <option key={target.id} value={target.id}>{target.name}{target.enabled ? '' : '（已暂停）'}</option>)}</select></label>
-              <button className="button primary" type="button" disabled={!selectedTarget?.authConfigured || dirty || operationPending} onClick={() => { if (!targetId) return; clearOperationMessages(); detectMutation.mutate(targetId) }}><Search aria-hidden="true" size={18} />自动检测分组</button>
-              <button className="button secondary" type="button" disabled={!selectedTarget?.authConfigured || monitoredCount === 0 || dirty || operationPending} onClick={() => { if (!targetId) return; clearOperationMessages(); checkMutation.mutate(targetId) }}><RefreshCw className={checkMutation.isPending ? 'spin' : ''} aria-hidden="true" size={18} />刷新当前渠道</button>
-            </div>
-            {selectedTarget && !selectedTarget.authConfigured ? <InlineMessage tone="warning">该渠道还没有可用的登录信息。<Link to={`/targets/${selectedTarget.id}/edit`}>去编辑渠道</Link></InlineMessage> : null}
-            {selectedTarget && !selectedTarget.enabled ? <InlineMessage tone="warning">该渠道已暂停，后台不会定时检测倍率；仍可在这里手动检测。</InlineMessage> : null}
-            {dirty ? <InlineMessage tone="warning">分组选择尚未保存，请先保存或恢复原来的选择再检测倍率。</InlineMessage> : null}
-            {viewState?.lastCheckedAt ? <p className="multiplier-last-check">最近检测：<time dateTime={viewState.lastCheckedAt} title={formatDateTime(viewState.lastCheckedAt)}>{formatRelativeTime(viewState.lastCheckedAt)}</time></p> : null}
-          </section>
-
-          {operationError ? <InlineMessage tone="danger">{operationError.message}</InlineMessage> : null}
-          {successMessage ? <InlineMessage tone="success">{successMessage}</InlineMessage> : null}
-          {viewState?.lastError ? <InlineMessage tone="warning">最近一次倍率检测失败：{viewState.lastError}</InlineMessage> : null}
-
-          {targetId && stateQuery.isPending && !detectedState ? <LoadingView label="正在读取倍率监控" /> : null}
-          {targetId && stateQuery.isError && !viewState ? <ErrorView message={stateQuery.error.message} onRetry={() => void stateQuery.refetch()} /> : null}
-          {targetId && stateQuery.isError && viewState ? <InlineMessage tone="warning">后台状态重新读取失败，当前显示的是上一次结果。<button className="button ghost compact" type="button" onClick={() => void stateQuery.refetch()}>重新读取</button></InlineMessage> : null}
-
-          {viewState && !stateQuery.isPending ? (
-            <section className="content-section" aria-labelledby="multiplier-groups-title">
-              <div className="section-heading-row multiplier-list-heading">
-                <div><h2 id="multiplier-groups-title">分组列表</h2><p>{groups.length ? `已选 ${selectedKeys.size} 个，共显示 ${groups.length} 个分组。` : '点击“自动检测分组”读取这个渠道当前可用的固定倍率分组。'}</p></div>
-                {groups.length ? <div className="compact-actions"><button className="button ghost compact" type="button" disabled={operationPending} onClick={() => selectAll(true)}><SquareCheckBig aria-hidden="true" size={17} />全选</button><button className="button ghost compact" type="button" disabled={operationPending} onClick={() => selectAll(false)}>取消全选</button></div> : null}
-              </div>
-
-              {groups.length ? (
-                <div className="multiplier-table" role="table" aria-label="分组倍率列表">
-                  <div className="multiplier-table-header" role="row"><span role="columnheader">监控</span><span role="columnheader">分组</span><span role="columnheader">当前倍率</span><span role="columnheader">上次变化</span><span role="columnheader">状态</span></div>
-                  <div className="multiplier-table-body" role="rowgroup">{groups.map((group) => {
-                    const displayStatus = group.lastError ? 'unknown' : group.status
-                    const StatusIcon = statusIcons[displayStatus]
-                    const checked = selectedKeys.has(group.key)
-                    return <div className={`multiplier-row status-${displayStatus}`} role="row" key={group.key} id={`multiplier-${group.key}`}>
-                      <label className="multiplier-checkbox" role="cell"><input type="checkbox" checked={checked} disabled={operationPending} onChange={() => toggleGroup(group.key)} /><span className="sr-only">监控 {group.name}</span></label>
-                      <div className="multiplier-group-name" role="cell"><strong>{group.name}</strong>{group.description ? <small>{group.description}</small> : null}<small>标识：{group.key}</small></div>
-                      <div className="multiplier-value" role="cell"><span className="mobile-cell-label">当前倍率</span><strong>{multiplierText(group.multiplier)}</strong>{group.previousMultiplier && group.status === 'changed' ? <small>{group.previousMultiplier}× → {group.multiplier}×</small> : null}</div>
-                      <div className="multiplier-changed-at" role="cell"><span className="mobile-cell-label">上次变化</span>{group.changedAt ? <time dateTime={group.changedAt} title={formatDateTime(group.changedAt)}>{formatRelativeTime(group.changedAt)}</time> : <span>暂无变化</span>}</div>
-                      <div className={`multiplier-state state-${displayStatus}`} role="cell"><StatusIcon aria-hidden="true" size={18} /><span>{groupStatusLabel(group)}</span>{group.lastError ? <small>{group.lastError}</small> : null}</div>
-                    </div>
-                  })}</div>
-                </div>
-              ) : <EmptyState title="尚未检测分组" description="自动检测后可以勾选要监控的分组；第一次保存只建立基准，不会误发通知。" />}
-
-              {groups.length ? <div className="multiplier-save-bar"><div><Percent aria-hidden="true" size={19} /><span>只比较已勾选分组的实际倍率；名称或说明变化不会触发提醒。</span></div><button className="button primary" type="button" disabled={!dirty || operationPending} onClick={saveSelection}><Save aria-hidden="true" size={18} />{saveMutation.isPending ? '正在保存' : '保存监控'}</button></div> : null}
-            </section>
-          ) : null}
-        </>
+      <PageHeader title="分组倍率" description="按渠道查看已经选择监控的分组、倍率状态和模型价格；价格仅供查看，不参与告警。" />
+      {eligibleTargets.length === 0 ? <EmptyState title="还没有可监控的渠道" description="先添加 New API 或 Sub2API 渠道并配置登录信息。" action={<Link className="button primary" to="/targets/new">添加渠道</Link>} /> : (
+        <section className="multiplier-channel-list" aria-label="渠道倍率列表">
+          {eligibleTargets.map((target) => <MultiplierChannelDetails key={target.id} target={target} expanded={expandedTargets.has(target.id)} onToggle={(open) => setExpandedTargets((current) => {
+            if (current.has(target.id) === open) return current
+            const next = new Set(current)
+            if (open) next.add(target.id)
+            else next.delete(target.id)
+            return next
+          })} />)}
+        </section>
       )}
     </div>
   )

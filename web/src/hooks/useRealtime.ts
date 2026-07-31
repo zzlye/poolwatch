@@ -34,6 +34,8 @@ export function useRealtime(enabled: boolean): void {
     source.addEventListener('alert', refreshAlerts)
     source.addEventListener('multiplier.updated', () => {
       void queryClient.invalidateQueries({ queryKey: ['group-multipliers'] })
+      // 模型价格按当前分组倍率计算，倍率变化后不能继续展示旧缓存。
+      void queryClient.invalidateQueries({ queryKey: ['group-prices'] })
       refreshAlerts()
     })
     source.addEventListener('settings.updated', refreshSettings)

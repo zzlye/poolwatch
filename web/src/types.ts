@@ -178,6 +178,38 @@ export interface TargetMultiplierState {
   lastError?: string
 }
 
+export interface GroupModelPrice {
+  key: string
+  label: string
+  value: string
+  unit: string
+}
+
+export interface GroupModelPriceInterval {
+  label: string
+  condition?: string
+  minTokens?: string
+  maxTokens?: string
+  prices: GroupModelPrice[]
+}
+
+export interface GroupPriceModel {
+  name: string
+  billingMode: string
+  prices: GroupModelPrice[]
+  intervals?: GroupModelPriceInterval[]
+  note?: string
+}
+
+export interface GroupPriceResult {
+  targetId: string
+  groupKey: string
+  groupName: string
+  multiplier: string
+  models: GroupPriceModel[]
+  notice?: string
+}
+
 export interface DashboardData {
   summary: {
     totalTargets: number

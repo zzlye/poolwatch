@@ -221,15 +221,61 @@ type Snapshot struct {
 
 // GroupMultiplier 是渠道向当前登录用户公开的单个分组及其实际计费倍率。
 type GroupMultiplier struct {
-	Key         string          `json:"key"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Multiplier  decimal.Decimal `json:"multiplier"`
+	Key                  string                     `json:"key"`
+	Name                 string                     `json:"name"`
+	Description          string                     `json:"description,omitempty"`
+	Multiplier           decimal.Decimal            `json:"multiplier"`
+	BaseMultiplier       decimal.Decimal            `json:"-"`
+	ImageMultiplier      decimal.Decimal            `json:"-"`
+	ImageRateIndependent bool                       `json:"-"`
+	ImagePriceOverrides  map[string]decimal.Decimal `json:"-"`
 }
 
 // GroupMultiplierResult 保存倍率读取结果以及适配器轮换后的凭据。
 type GroupMultiplierResult struct {
 	Groups           []GroupMultiplier `json:"groups"`
+	CredentialUpdate *Credential       `json:"-"`
+}
+
+// GroupPriceItem 是渠道公开的一项最终价格，Value 已经乘入当前用户的实际分组倍率。
+type GroupPriceItem struct {
+	Key   string          `json:"key"`
+	Label string          `json:"label"`
+	Value decimal.Decimal `json:"value"`
+	Unit  string          `json:"unit"`
+}
+
+// GroupPriceInterval 表示模型的一档价格。
+// Token 边界使用人类可读的闭区间，并保留十进制字符串以避免跨端传输时损失大整数精度。
+type GroupPriceInterval struct {
+	Label     string           `json:"label"`
+	Condition string           `json:"condition,omitempty"`
+	MinTokens string           `json:"min_tokens,omitempty"`
+	MaxTokens string           `json:"max_tokens,omitempty"`
+	Prices    []GroupPriceItem `json:"prices"`
+}
+
+// GroupModelPrice 是一个模型在指定分组下可以安全展示的实际价格。
+type GroupModelPrice struct {
+	Name        string               `json:"name"`
+	BillingMode string               `json:"billing_mode"`
+	Prices      []GroupPriceItem     `json:"prices"`
+	Intervals   []GroupPriceInterval `json:"intervals,omitempty"`
+	Note        string               `json:"note,omitempty"`
+}
+
+// GroupPriceCatalog 是指定分组按需读取的只读价格目录，不参与历史记录或告警。
+type GroupPriceCatalog struct {
+	GroupKey   string            `json:"group_key"`
+	GroupName  string            `json:"group_name"`
+	Multiplier decimal.Decimal   `json:"multiplier"`
+	Models     []GroupModelPrice `json:"models"`
+	Notice     string            `json:"notice,omitempty"`
+}
+
+// GroupPriceResult 保存价格目录以及适配器轮换后的凭据。
+type GroupPriceResult struct {
+	Catalog          GroupPriceCatalog `json:"catalog"`
 	CredentialUpdate *Credential       `json:"-"`
 }
 
@@ -268,6 +314,11 @@ type BrowserCredentialVerifier interface {
 // GroupMultiplierReader 读取当前登录用户实际可用的分组倍率。
 type GroupMultiplierReader interface {
 	ReadGroupMultipliers(ctx context.Context, target TargetInput) (GroupMultiplierResult, error)
+}
+
+// GroupPriceReader 按需读取一个已监控分组的当前模型价格。
+type GroupPriceReader interface {
+	ReadGroupPrices(ctx context.Context, target TargetInput, groupKey string) (GroupPriceResult, error)
 }
 
 // Detector 根据只读公开端点识别渠道类型。

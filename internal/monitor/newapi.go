@@ -184,6 +184,10 @@ func (adapter *newAPIAdapter) readGroupMultipliers(ctx context.Context, session 
 	}
 	payload = nil
 	if err := session.doJSON(ctx, http.MethodGet, pricingURL, headers, nil, &payload); err != nil {
+		// 部分站点会关闭价格导航模块并对价格页返回 403，这不代表登录凭据一定失效。
+		if statusCodeOf(err) == http.StatusForbidden {
+			return nil, checkError(ErrorClassRemote, "读取 New API 分组倍率", "当前站点未公开价格与旧版分组倍率", http.StatusForbidden, nil)
+		}
 		return nil, err
 	}
 	object, ok := payload.(map[string]any)

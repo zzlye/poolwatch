@@ -32,7 +32,7 @@ export default function TargetsPage() {
 
   return (
     <div className="page-stack">
-      <PageHeader title="渠道管理" description="管理检测地址、登录方式、指标阈值和充值入口。" actions={<>
+      <PageHeader title="渠道管理" description="管理检测地址、登录方式、指标阈值、分组倍率和充值入口。" actions={<>
         <button className="button secondary" type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}><RefreshCw className={refreshMutation.isPending ? 'spin' : ''} aria-hidden="true" size={18} />{refreshMutation.isPending ? '正在刷新' : '全部刷新'}</button>
         <Link className="button primary" to="/targets/new"><Plus aria-hidden="true" size={18} />添加渠道</Link>
       </>} />

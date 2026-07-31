@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -238,6 +239,65 @@ func (s *Service) DetectGroupMultipliers(ctx context.Context, targetID string) (
 		return nil, err
 	}
 	return s.checkGroupMultipliersUnlocked(ctx, &target)
+}
+
+// ReadGroupPrices 按需读取一个已监控分组的当前价格，不写入历史也不触发告警。
+func (s *Service) ReadGroupPrices(ctx context.Context, targetID, groupKey string) (monitor.GroupPriceCatalog, error) {
+	if !s.acquireTarget(targetID) {
+		return monitor.GroupPriceCatalog{}, ErrAlreadyRunning
+	}
+	defer s.releaseTarget(targetID)
+	select {
+	case s.semaphore <- struct{}{}:
+		defer func() { <-s.semaphore }()
+	case <-ctx.Done():
+		return monitor.GroupPriceCatalog{}, ctx.Err()
+	}
+	target, err := s.store.TargetByID(ctx, targetID)
+	if err != nil {
+		return monitor.GroupPriceCatalog{}, err
+	}
+	if !supportsGroupMultipliers(target.Kind) {
+		return monitor.GroupPriceCatalog{}, errors.New("只有 New API 和 Sub2API 渠道支持分组价格")
+	}
+	groupKey = strings.TrimSpace(groupKey)
+	monitors, err := s.store.ListGroupMultiplierMonitors(ctx, targetID)
+	if err != nil {
+		return monitor.GroupPriceCatalog{}, err
+	}
+	monitored := false
+	for _, item := range monitors {
+		if item.GroupKey == groupKey {
+			monitored = true
+			break
+		}
+	}
+	if !monitored {
+		return monitor.GroupPriceCatalog{}, errors.New("该分组尚未加入倍率监控")
+	}
+	runtimeConfig, err := s.runtimeConfig(target)
+	if err != nil {
+		return monitor.GroupPriceCatalog{}, err
+	}
+	reader, ok := s.runner.(monitor.GroupPriceReader)
+	if !ok {
+		return monitor.GroupPriceCatalog{}, errors.New("当前检测器不支持分组价格")
+	}
+	timeoutContext, cancel := context.WithTimeout(ctx, s.checkTimeout)
+	defer cancel()
+	result, err := reader.ReadGroupPrices(timeoutContext, runtimeConfig, groupKey)
+	if result.CredentialUpdate != nil {
+		if persistErr := s.persistCredentialUpdate(ctx, &target, result.CredentialUpdate); persistErr != nil {
+			return monitor.GroupPriceCatalog{}, errors.Join(err, persistErr)
+		}
+	}
+	if err != nil {
+		return monitor.GroupPriceCatalog{}, err
+	}
+	if result.Catalog.GroupKey != groupKey {
+		return monitor.GroupPriceCatalog{}, errors.New("渠道返回的价格分组与请求不一致")
+	}
+	return result.Catalog, nil
 }
 
 // SaveGroupMultiplierSelection 重新读取上游后保存选择，新分组只建立基准而不告警。

@@ -197,6 +197,40 @@ func (adapter *sub2APIAdapter) readGroupMultipliers(ctx context.Context, session
 			}
 			ratio = parsed
 		}
+		// Sub2API 先用基础或用户倍率确定图片倍率，再只为 Token 和普通按次叠加当前高峰倍率。
+		baseMultiplier := ratio
+		imageMultiplier := baseMultiplier
+		imageRateIndependent, _ := boolField(item, "image_rate_independent")
+		if imageRateIndependent {
+			rawImageMultiplier, exists := firstValue(item, "image_rate_multiplier")
+			if !exists {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 独立图片倍率无效", 0, nil)
+			}
+			parsed, parseErr := parseGroupMultiplierDecimal(rawImageMultiplier)
+			if parseErr != nil || parsed.IsNegative() {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 独立图片倍率无效", 0, parseErr)
+			}
+			imageMultiplier = parsed
+		}
+		imagePriceOverrides := make(map[string]decimal.Decimal)
+		for _, definition := range []struct {
+			field string
+			size  string
+		}{
+			{field: "image_price_1k", size: "1K"},
+			{field: "image_price_2k", size: "2K"},
+			{field: "image_price_4k", size: "4K"},
+		} {
+			rawPrice, exists := item[definition.field]
+			if !exists || rawPrice == nil {
+				continue
+			}
+			price, priceErr := parsePriceDecimal(rawPrice)
+			if priceErr != nil {
+				return nil, checkError(ErrorClassResponse, "解析 Sub2API 分组倍率", "Sub2API 分组图片价格无效", 0, priceErr)
+			}
+			imagePriceOverrides[definition.size] = price
+		}
 		if serverLocation != nil {
 			peak, peakErr := sub2APIPeakMultiplier(item, adapter.now().In(serverLocation))
 			if peakErr != nil {
@@ -212,7 +246,10 @@ func (adapter *sub2APIAdapter) readGroupMultipliers(ctx context.Context, session
 			name = "分组 " + key
 		}
 		groups = append(groups, GroupMultiplier{
-			Key: key, Name: name, Description: strings.TrimSpace(stringField(item, "description")), Multiplier: ratio,
+			Key: key, Name: name, Description: strings.TrimSpace(stringField(item, "description")),
+			Multiplier: ratio, BaseMultiplier: baseMultiplier,
+			ImageMultiplier: imageMultiplier, ImageRateIndependent: imageRateIndependent,
+			ImagePriceOverrides: imagePriceOverrides,
 		})
 	}
 	if len(groups) == 0 {

@@ -174,6 +174,43 @@ func (registry *Registry) ReadGroupMultipliers(ctx context.Context, target Targe
 	return result, err
 }
 
+// ReadGroupPrices 读取指定分组的公开模型价格，并只对网络和服务端错误重试。
+func (registry *Registry) ReadGroupPrices(ctx context.Context, target TargetInput, groupKey string) (GroupPriceResult, error) {
+	adapter, err := registry.Adapter(target.Kind)
+	if err != nil {
+		return GroupPriceResult{}, err
+	}
+	reader, ok := adapter.(GroupPriceReader)
+	if !ok {
+		return GroupPriceResult{}, checkError(ErrorClassConfig, "读取分组价格", "该渠道不支持分组价格展示", 0, nil)
+	}
+	var result GroupPriceResult
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err = reader.ReadGroupPrices(ctx, target, groupKey)
+		if err == nil {
+			return result, nil
+		}
+		kind := ErrorClassOf(err)
+		if kind != ErrorClassNetwork && kind != ErrorClassServer {
+			return result, err
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			// 适配器可能已经成功轮换令牌；即使读取超时也要把凭据交给调度层先行持久化。
+			return result, checkError(ErrorClassNetwork, "重试分组价格读取", "分组价格读取已取消或超时", 0, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return result, err
+}
+
 func runWithRetry(ctx context.Context, run func() (Result, any, error)) (Result, any, error) {
 	var result Result
 	var sample any

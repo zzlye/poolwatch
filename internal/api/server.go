@@ -120,6 +120,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/targets/{id}/group-multipliers/detect", s.protected(http.HandlerFunc(s.handleDetectGroupMultipliers)))
 	mux.Handle("PUT /api/targets/{id}/group-multipliers", s.protected(http.HandlerFunc(s.handleSaveGroupMultipliers)))
 	mux.Handle("POST /api/targets/{id}/group-multipliers/check", s.protected(http.HandlerFunc(s.handleCheckGroupMultipliers)))
+	mux.Handle("GET /api/targets/{id}/group-prices", s.protected(http.HandlerFunc(s.handleGroupPrices)))
 	mux.Handle("GET /api/targets/{id}/history", s.protected(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("POST /api/checks", s.protected(http.HandlerFunc(s.handleCheckAll)))
 

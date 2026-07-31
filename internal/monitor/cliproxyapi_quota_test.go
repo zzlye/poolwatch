@@ -421,7 +421,8 @@ func TestCLIProxyAPI慢账号不会长期占用全部额度查询工位(t *testi
 	defer server.Close()
 
 	adapter := newCLIProxyAPIAdapter(newSecureHTTPClient(HTTPOptions{}))
-	adapter.quotaRequestTimeout = 80 * time.Millisecond
+	// 为 Windows 下的域名校验和连接回收预留调度余量，同时仍明显短于模拟慢请求。
+	adapter.quotaRequestTimeout = 250 * time.Millisecond
 	accountIDs := make([]string, 0, len(accounts))
 	for index := range accounts {
 		accountIDs = append(accountIDs, PublicAccountID(TargetKindCLIProxyAPI, "codex-"+string(rune('a'+index))))

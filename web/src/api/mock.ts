@@ -6,6 +6,7 @@ import type {
   DetectTargetResult,
   EmailSettings,
   GroupMultiplier,
+  GroupPriceResult,
   HistoryResult,
   PushInfo,
   SanitizedAccount,
@@ -226,6 +227,51 @@ function mockMultiplierState(target: Target, includeDetected: boolean): TargetMu
   }
 }
 
+function mockGroupPrices(target: Target, groupKey: string): GroupPriceResult {
+  const group = (multiplierCatalog.get(target.id) ?? []).find((item) => item.key === groupKey)
+  const selected = multiplierSelections.get(target.id) ?? new Set<string>()
+  if (!group || !selected.has(groupKey)) throw new Error('该分组尚未选择监控，请先在渠道详情完成配置')
+  const isSub2API = target.kind === 'sub2api'
+  return {
+    targetId: target.id,
+    groupKey: group.key,
+    groupName: group.name,
+    multiplier: group.multiplier,
+    notice: '模拟价格按渠道当前公开数据展示，实际扣费规则以渠道结算记录为准。',
+    models: [
+      {
+        name: isSub2API ? 'claude-sonnet-4' : 'gpt-4.1',
+        billingMode: 'token',
+        prices: [
+          { key: 'input', label: '输入', value: isSub2API ? '3' : '2', unit: '元/百万 Token' },
+          { key: 'output', label: '输出', value: isSub2API ? '15' : '8', unit: '元/百万 Token' },
+          { key: 'cached', label: '缓存输入', value: isSub2API ? '0.3' : '0.5', unit: '元/百万 Token' }
+        ],
+        note: '支持文本与工具调用'
+      },
+      {
+        name: isSub2API ? 'gemini-2.5-pro' : 'gpt-4.1-long',
+        billingMode: 'tiered',
+        prices: [],
+        intervals: [
+          {
+            label: '标准上下文', minTokens: '0', maxTokens: '200000', prices: [
+              { key: 'input', label: '输入', value: '1.25', unit: '元/百万 Token' },
+              { key: 'output', label: '输出', value: '10', unit: '元/百万 Token' }
+            ]
+          },
+          {
+            label: '长上下文', minTokens: '200001', prices: [
+              { key: 'input', label: '输入', value: '2.5', unit: '元/百万 Token' },
+              { key: 'output', label: '输出', value: '15', unit: '元/百万 Token' }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+
 let settings: Settings = {
   productName: '号池监控',
   historyRetentionDays: 7,
@@ -411,6 +457,10 @@ export async function mockRequest<T>(path: string, init: RequestInit = {}): Prom
         unsupportedCount: selectedAccounts.filter((account) => account.quotaState === 'unsupported').length
       }
       return result as T
+    }
+    if (parts[4] === 'group-prices' && method === 'GET') {
+      const groupKey = new URL(path, window.location.origin).searchParams.get('groupKey') ?? ''
+      return mockGroupPrices(target, groupKey) as T
     }
     if (parts[4] === 'group-multipliers') {
       if (target.kind !== 'new_api' && target.kind !== 'sub2api') throw new Error('该渠道不支持倍率监控')

@@ -109,6 +109,24 @@ func (apiTestRunner) ReadGroupMultipliers(_ context.Context, target monitor.Targ
 	}}, nil
 }
 
+func (apiTestRunner) ReadGroupPrices(_ context.Context, target monitor.TargetInput, groupKey string) (monitor.GroupPriceResult, error) {
+	if (target.Kind != monitor.TargetKindNewAPI && target.Kind != monitor.TargetKindSub2API) || groupKey != "default" {
+		return monitor.GroupPriceResult{}, &monitor.CheckError{Kind: monitor.ErrorClassConfig, Message: "分组价格不可用"}
+	}
+	return monitor.GroupPriceResult{Catalog: monitor.GroupPriceCatalog{
+		GroupKey: groupKey, GroupName: "默认分组", Multiplier: decimal.RequireFromString("0.5"),
+		Models: []monitor.GroupModelPrice{{
+			Name: "gpt-price", BillingMode: "tiered",
+			Prices: []monitor.GroupPriceItem{{Key: "input", Label: "输入", Value: decimal.RequireFromString("1.25"), Unit: "USD/百万令牌"}},
+			Intervals: []monitor.GroupPriceInterval{{
+				Label: "长上下文", Condition: "上下文 Token > 200000", MinTokens: "200001", Prices: []monitor.GroupPriceItem{{
+					Key: "output", Label: "输出", Value: decimal.RequireFromString("7.5"), Unit: "USD/百万令牌",
+				}},
+			}},
+		}},
+	}}, nil
+}
+
 func TestHTTPInitializationTargetHistoryAndSecretBoundary(t *testing.T) {
 	testServer, database, vault := newAPITestServer(t)
 	defer testServer.Close()

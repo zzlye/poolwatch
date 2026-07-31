@@ -8,6 +8,7 @@ import type {
   EmailSettings,
   EmailSettingsInput,
   HistoryResult,
+  GroupPriceResult,
   TargetMultiplierState,
   PushInfo,
   Settings,
@@ -97,6 +98,7 @@ export const api = {
     body: jsonBody({ groupKeys })
   }),
   checkMultiplierGroups: (id: string) => apiRequest<TargetMultiplierState>(`/api/targets/${encodeURIComponent(id)}/group-multipliers/check`, { method: 'POST' }),
+  groupPrices: (id: string, groupKey: string) => apiRequest<GroupPriceResult>(`/api/targets/${encodeURIComponent(id)}/group-prices?groupKey=${encodeURIComponent(groupKey)}`),
   checkAll: () => apiRequest<void>('/api/checks', { method: 'POST' }),
   history: (id: string, metric?: string) => apiRequest<HistoryResult>(`/api/targets/${encodeURIComponent(id)}/history${metric ? `?metric=${encodeURIComponent(metric)}` : ''}`),
   alerts: (status = 'all') => apiRequest<Alert[]>(`/api/alerts?status=${encodeURIComponent(status)}`),

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, CheckCircle2, Clock3, Edit3, ExternalLink, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { AccountPoolView } from '../components/AccountPoolView'
 import { CLIProxyAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
+import { GroupMultiplierEditor } from '../components/GroupMultiplierEditor'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
 import { formatDateTime, formatMetric, formatRelativeTime } from '../lib/format'
@@ -28,11 +29,20 @@ function historyThresholdText(value: string, threshold: string, comparison: Thre
 
 export default function TargetDetailPage() {
   const { id = '' } = useParams()
+  const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [selectedMetric, setSelectedMetric] = useState<MetricKey | ''>('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const targetQuery = useQuery({ queryKey: ['target', id], queryFn: () => api.target(id) })
+
+  useEffect(() => {
+    const target = targetQuery.data
+    if (!target || location.hash !== '#multiplier-settings' || (target.kind !== 'new_api' && target.kind !== 'sub2api')) return undefined
+    // 详情数据异步返回后倍率区块才会出现，需要再次执行锚点滚动。
+    const frame = window.requestAnimationFrame(() => document.getElementById('multiplier-settings')?.scrollIntoView?.({ block: 'start' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [location.hash, targetQuery.data?.id, targetQuery.data?.kind])
 
   useEffect(() => {
     if (!selectedMetric && targetQuery.data?.metrics[0]) setSelectedMetric(targetQuery.data.metrics[0].key)
@@ -49,6 +59,8 @@ export default function TargetDetailPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['target', id] }),
         queryClient.invalidateQueries({ queryKey: ['history', id] }),
+        queryClient.invalidateQueries({ queryKey: ['group-multipliers', id] }),
+        queryClient.invalidateQueries({ queryKey: ['group-prices', id] }),
         queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       ])
     }
@@ -130,6 +142,8 @@ export default function TargetDetailPage() {
           ))}
         </div>
       </section>
+
+      {target.kind === 'new_api' || target.kind === 'sub2api' ? <GroupMultiplierEditor key={target.id} target={target} /> : null}
 
       <section className="content-section" aria-labelledby="history-title">
         <div className="section-heading"><div><h2 id="history-title">历史趋势</h2><p>{selectedDefinition ? `${selectedDefinition.label} · ${selectedDefinition.unit}` : '选择一个指标查看趋势'}</p></div>{target.metrics.length > 1 ? <label className="compact-field"><span>指标</span><select value={selectedMetric} onChange={(event) => setSelectedMetric(event.target.value as MetricKey)}>{target.metrics.map((metric) => <option key={metric.key} value={metric.key}>{metric.label}</option>)}</select></label> : null}</div>
