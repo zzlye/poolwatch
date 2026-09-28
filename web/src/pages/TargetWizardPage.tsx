@@ -10,8 +10,8 @@ import { metricLabels, targetKindLabels } from '../types'
 
 const steps = ['基本信息', '登录方式', '指标阈值', '检测与保存']
 // 浏览器助手压缩包随页面一起发布，桌面端安装后即可读取当前填写站点的会话。
-const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.1.0.zip'
-const minimumBrowserHelperVersion = [1, 1, 0] as const
+const browserHelperDownloadURL = '/downloads/poolwatch-browser-helper-v1.2.0.zip'
+const minimumBrowserHelperVersion = [1, 2, 0] as const
 const browserHelperInstallMessage = '安装浏览器助手并刷新本页后，即可一键读取已登录站点。'
 const browserHelperUpdateMessage = '当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。'
 const androidHTTPSMessage = '安卓端网页登录仅支持 HTTPS 渠道地址。请返回上一步填写 HTTPS 地址，或使用桌面端浏览器助手导入当前登录状态。'
@@ -251,7 +251,7 @@ function JsonPointerPicker({ sample, value, onChange }: { sample: unknown; value
 const credentialModeOptions: Record<'new_api' | 'sub2api', Array<{ mode: CredentialMode; title: string; description: string }>> = {
   new_api: [
     { mode: 'browser_session', title: '网页授权', description: '支持 Linux.do、GitHub 等站点网页登录。' },
-    { mode: 'access_token', title: '访问令牌', description: '填写管理访问令牌和用户 ID。' },
+    { mode: 'access_token', title: '访问令牌', description: '填写管理访问令牌；新版站点可不填用户 ID。' },
     { mode: 'password', title: '账号密码', description: '使用站点账号、密码和可选二步验证。' }
   ],
   sub2api: [
@@ -661,7 +661,8 @@ function AuthenticationFields({
       {draft.credentialMode === 'access_token' ? (
         <>
           <SecretField label="访问令牌" value={draft.accessToken} show={showSecret} editing={editing} onChange={(accessToken) => update({ accessToken })} onToggle={() => setShowSecret((value) => !value)} />
-          {kind === 'new_api' ? <label className="field"><span>用户 ID</span><input value={draft.userId} onChange={(event) => update({ userId: event.target.value })} inputMode="numeric" placeholder={editing ? '留空表示保持不变' : ''} /></label> : null}
+          {kind === 'new_api' ? <label className="field"><span>用户 ID <em>旧版站点需要</em></span><input value={draft.userId} onChange={(event) => update({ userId: event.target.value })} inputMode="numeric" placeholder={editing ? '新版管理令牌可留空；留空表示保持不变' : '新版管理令牌可留空'} /></label> : null}
+          {kind === 'new_api' ? <div className="inline-message tone-info span-2">新版站点请在“安全与访问”生成管理访问令牌，直接粘贴令牌即可；旧版站点返回需要用户编号时，再补填用户 ID。</div> : null}
           {kind === 'sub2api' ? <SecretField label="刷新令牌" value={draft.refreshToken} show={showSecret} editing={editing} onChange={(refreshToken) => update({ refreshToken })} onToggle={() => setShowSecret((value) => !value)} optional /> : null}
         </>
       ) : null}
@@ -804,8 +805,8 @@ function WizardForm({ existing, defaultCheckIntervalMinutes, recoverBrowserSessi
     setError('')
     if (recoveringBrowser && draft.kind === 'new_api' && step >= 1) {
       const hasBrowserSession = draft.credentialMode === 'browser_session' && (Boolean(draft.browserAuthAttemptId) || Boolean(draft.cookie.trim() && draft.userId.trim()))
-      const hasManagementToken = draft.credentialMode === 'access_token' && Boolean(draft.accessToken.trim() && draft.userId.trim())
-      if (!hasBrowserSession && !hasManagementToken) return setError('请先完成当前站点的网页授权，或填写管理访问令牌和用户 ID。'), false
+      const hasManagementToken = draft.credentialMode === 'access_token' && Boolean(draft.accessToken.trim())
+      if (!hasBrowserSession && !hasManagementToken) return setError('请先完成当前站点的网页授权，或填写管理访问令牌。'), false
       if (step === 3 && verifiedAuthorization.current !== authorizationTestKey(draft)) return setError('请先测试连接成功后再保存；更改登录信息后需要重新测试。'), false
     }
     if (step === 0) {

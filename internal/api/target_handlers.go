@@ -789,14 +789,16 @@ func mergeNewAPICredential(credential monitor.Credential, draft targetDraft, mod
 		credential.TOTPSecret = ""
 		credential.RefreshToken = ""
 		credential.Cookie = ""
+		if strings.TrimSpace(draft.AccessToken) != "" && strings.TrimSpace(draft.UserID) == "" {
+			// 更换令牌时清除旧版用户编号，避免新版令牌误走旧版认证头。
+			credential.UserID = ""
+		}
 		mergeString(&credential.AccessToken, draft.AccessToken)
 		mergeString(&credential.UserID, draft.UserID)
 		if err := validateImportedToken(credential.AccessToken, "New API 访问令牌"); err != nil {
 			return monitor.Credential{}, err
 		}
-		if strings.TrimSpace(credential.UserID) == "" {
-			return monitor.Credential{}, errors.New("New API 访问令牌登录需要用户 ID")
-		}
+		// 新版管理访问令牌可以独立验证身份；旧站点需要时再由用户填写编号。
 	case credentialModeNewAPIBrowserSession:
 		credential.Username = ""
 		credential.Email = ""

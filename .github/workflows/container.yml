@@ -54,6 +54,9 @@ jobs:
           node --check browser-extension/options.js
           node -e "JSON.parse(require('node:fs').readFileSync('browser-extension/manifest.json', 'utf8'))"
 
+      - name: 运行浏览器助手回归测试
+        run: node --test scripts/test-browser-helper.cjs
+
       - name: 运行前端测试
         working-directory: web
         run: npm test

@@ -5,7 +5,7 @@ const DEFAULT_TRUSTED_ORIGINS = [
   'http://localhost',
   'http://localhost:8080'
 ]
-const HELPER_VERSION = '1.1.0'
+const HELPER_VERSION = '1.2.0'
 const HELPER_CAPABILITIES = ['new_api', 'sub2api']
 
 initializePoolWatchBridge()

@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!expectedKind) return false
   importTargetSession(message, sender, expectedKind)
     .then(sendResponse)
-    .catch((error) => sendResponse({ ok: false, message: safeErrorMessage(error) }))
+    .catch((error) => sendResponse({ ok: false, code: helperErrorCode(error), message: safeErrorMessage(error) }))
   return true
 })
 
@@ -71,8 +71,12 @@ async function importTargetSession(message, sender, expectedKind) {
   const baseURL = normalizeHTTPURL(taskPayload.baseUrl)
   if (!baseURL) throw new Error('渠道地址格式无效。')
   const targetOrigin = new URL(baseURL).origin
-  // 直接打开任务中的单个地址并复用当前浏览器会话，不枚举其他标签页或渠道。
-  const targetTab = await chrome.tabs.create({ url: baseURL, active: false })
+  // 只查询当前填写来源的标签页，优先复用已打开的控制台，保留页面内的登录上下文。
+  const matches = (await chrome.tabs.query({ url: targetOrigin + '/*' }))
+    .filter((tab) => typeof tab.id === 'number' && normalizeOrigin(tab.url) === targetOrigin)
+    .sort((left, right) => Number(right.active) - Number(left.active))
+  const createdTab = matches.length === 0
+  const targetTab = matches[0] || await chrome.tabs.create({ url: baseURL, active: false })
   if (!targetTab?.id) throw new Error('打开渠道站点失败。')
   let leaveTargetOpen = false
   try {
@@ -86,7 +90,7 @@ async function importTargetSession(message, sender, expectedKind) {
 
     const credential = expectedKind === 'sub2api'
       ? await readSub2APITokens(targetTab.id, baseURL)
-      : await readNewAPICredential(targetTab.id, baseURL)
+      : await readNewAPICredential(targetTab.id, baseURL, !createdTab)
     if (!credential) {
       leaveTargetOpen = true
       await focusTab(targetTab)
@@ -113,22 +117,38 @@ async function importTargetSession(message, sender, expectedKind) {
         : '已读取登录会话，号池监控正在完成校验。'
     }
   } finally {
-    if (!leaveTargetOpen) await closeTabQuietly(targetTab.id)
+    if (createdTab && !leaveTargetOpen) await closeTabQuietly(targetTab.id)
   }
 }
 
-async function readNewAPICredential(tabId, baseURL) {
+async function readNewAPICredential(tabId, baseURL, existingTab = false) {
   const selfResult = await readNewAPIUser(tabId, baseURL)
-  if (!selfResult.ok || !selfResult.userId) return null
+  if (!selfResult.ok || !selfResult.userId) {
+    if (selfResult.code === 'login_required' && !existingTab) return null
+    const descriptions = {
+      login_required: '当前站点页面已打开，但旧式会话接口未授权。新版站点请使用管理访问令牌，不必重复登录。',
+      modern_auth_required: '检测到新版登录会话：该站点使用短期令牌，旧式 Cookie 读取不适用。请使用站点管理访问令牌，不必重复登录。',
+      upstream_error: '站点用户接口暂时不可用，请稍后重试；这不代表尚未登录。',
+      access_denied: '站点用户接口拒绝访问，请检查授权或网页验证；这不代表尚未登录。',
+      origin_changed: '站点页面已跳转到其他来源，请回到当前配置的渠道地址后重试。',
+      invalid_response: '站点用户接口格式已经变化，请使用管理访问令牌或联系维护者。',
+      network_error: '读取站点用户接口失败，请检查网络后重试。'
+    }
+    const code = Object.hasOwn(descriptions, selfResult.code) ? selfResult.code : 'invalid_response'
+    throw Object.assign(new Error(descriptions[code]), { code })
+  }
 
   const selfURL = new URL('/api/user/self', baseURL).toString()
-  const cookies = await chrome.cookies.getAll({ url: selfURL })
+  const stores = await chrome.cookies.getAllCookieStores()
+  const store = stores.find((entry) => entry.tabIds.includes(tabId))
+  const cookies = await chrome.cookies.getAll({ url: selfURL, ...(store ? { storeId: store.id } : {}) })
   const cookieHeader = cookies
     .filter((cookie) => cookie.name && cookie.value !== undefined)
     .sort((left, right) => (right.path?.length || 0) - (left.path?.length || 0) || left.name.localeCompare(right.name))
     .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join('; ')
-  return cookieHeader ? { cookie: cookieHeader, userId: selfResult.userId } : null
+  if (!cookieHeader) throw Object.assign(new Error('站点已返回用户信息，但没有可导入的会话 Cookie。请使用管理访问令牌。'), { code: 'cookie_unavailable' })
+  return { cookie: cookieHeader, userId: selfResult.userId }
 }
 
 async function readSub2APITokens(tabId, baseURL) {
@@ -171,7 +191,12 @@ async function readNewAPIUser(tabId, baseURL) {
     world: 'MAIN',
     args: [baseURL],
     func: async (targetBaseURL) => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15000)
       try {
+        if (window.location.origin !== new URL(targetBaseURL).origin) return { ok: false, status: 0, code: 'origin_changed' }
+        // 新版站点把短期令牌保存在内存，只用公开会话标记识别协议，不提取或轮换它的续期凭据。
+        const modernSession = document.cookie.split(';').some((part) => part.trim().startsWith('new_api_has_session='))
         // New API 的不同版本可能把用户编号放在不同的本地存储键中，只读取固定白名单。
         const readStoredUserId = () => {
           const objectKeys = ['user', 'new-api-user', 'user_info', 'userInfo']
@@ -201,24 +226,34 @@ async function readNewAPIUser(tabId, baseURL) {
         const response = await fetch(endpoint, {
           cache: 'no-store',
           credentials: 'include',
+          redirect: 'error',
+          signal: controller.signal,
           headers
         })
+        if (response.status >= 500 || response.status === 429) return { ok: false, status: response.status, code: 'upstream_error' }
+        if (!response.ok && modernSession) return { ok: false, status: response.status, code: 'modern_auth_required' }
+        if (response.status === 401) return { ok: false, status: 401, code: 'login_required' }
+        if (response.status === 403) return { ok: false, status: 403, code: 'access_denied' }
         const text = await response.text()
         let payload = null
         try {
           payload = JSON.parse(text)
         } catch {
-          return { ok: false, status: response.status }
+          return { ok: false, status: response.status, code: 'invalid_response' }
         }
+        if (!response.ok || payload?.success === false) return { ok: false, status: response.status, code: modernSession ? 'modern_auth_required' : 'invalid_response' }
         const data = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
           ? payload.data
           : payload
         const rawID = data?.id ?? data?.user_id
         const responseUserId = rawID === undefined || rawID === null ? '' : String(rawID).trim()
         const userId = /^\d+$/.test(responseUserId) && responseUserId !== '0' ? responseUserId : storedUserId
-        return { ok: response.ok && /^\d+$/.test(userId) && userId !== '0', status: response.status, userId }
+        const ok = /^\d+$/.test(userId) && userId !== '0'
+        return { ok, status: response.status, userId: ok ? userId : '', code: ok ? undefined : 'invalid_response' }
       } catch {
-        return { ok: false, status: 0 }
+        return { ok: false, status: 0, code: 'network_error' }
+      } finally {
+        clearTimeout(timeout)
       }
     }
   })
@@ -363,4 +398,10 @@ function apiMessage(payload, fallback) {
 function safeErrorMessage(error) {
   const message = error instanceof Error ? error.message : String(error || '')
   return message && message.length <= 200 ? message : '浏览器助手执行失败，请刷新页面后重试。'
+}
+
+function helperErrorCode(error) {
+  // 只回传固定错误类别，不把站点响应或异常对象当作诊断详情发送。
+  const codes = ['modern_auth_required', 'upstream_error', 'access_denied', 'origin_changed', 'invalid_response', 'network_error', 'cookie_unavailable']
+  return codes.includes(error?.code) ? error.code : 'helper_error'
 }

@@ -50,6 +50,25 @@ describe('浏览器验证恢复登录', () => {
     expect(screen.getByRole('heading', { name: '登录与认证' })).toBeInTheDocument()
   })
 
+  it('新版管理访问令牌无需用户 ID，连接测试成功后可保存', async () => {
+    vi.spyOn(api, 'target').mockResolvedValue(target)
+    vi.spyOn(api, 'testTarget').mockResolvedValue({ ok: true, message: '连接成功' })
+    const update = vi.spyOn(api, 'updateTarget').mockResolvedValue({ ...target, credentialMode: 'access_token', status: 'healthy' })
+    mount('/targets/target_turnstile/edit?auth=browser')
+    await screen.findByRole('heading', { name: '登录与认证' })
+    fireEvent.click(screen.getByRole('radio', { name: /访问令牌/ }))
+    fireEvent.change(screen.getByLabelText('访问令牌'), { target: { value: 'synthetic-management-token' } })
+    expect(screen.getByPlaceholderText(/新版管理令牌可留空/)).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
+    await screen.findByText('连接成功')
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(update).toHaveBeenCalledWith(target.id, expect.objectContaining({
+      credentialMode: 'access_token', accessToken: 'synthetic-management-token', userId: ''
+    })))
+  })
+
   it('更改已通过测试的凭据后必须重新验证', async () => {
     vi.spyOn(api, 'target').mockResolvedValue(target)
     vi.spyOn(api, 'testTarget').mockResolvedValue({ ok: true, message: '连接成功' })

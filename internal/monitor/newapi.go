@@ -366,7 +366,9 @@ func (adapter *newAPIAdapter) authenticate(ctx context.Context, session *request
 	}
 	if strings.TrimSpace(credential.AccessToken) != "" {
 		if userID == "" {
-			return nil, checkError(ErrorClassConfig, "配置 New API 认证", "使用管理访问令牌时必须填写用户 ID", 0, nil)
+			// 新版管理令牌使用标准 Bearer 身份，不再要求额外的旧版用户编号。
+			setBearer(headers, credential.AccessToken)
+			return headers, nil
 		}
 		headers.Set("Authorization", strings.TrimSpace(credential.AccessToken))
 		headers.Set("New-Api-User", userID)

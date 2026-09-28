@@ -148,7 +148,7 @@ describe('渠道向导', () => {
         data: {
           source: 'poolwatch-extension',
           type: 'POOLWATCH_BROWSER_HELPER_READY',
-          version: '1.1.0',
+          version: '1.2.0',
           capabilities: ['new_api', 'sub2api']
         }
       }))
@@ -184,7 +184,7 @@ describe('渠道向导', () => {
         data: {
           source: 'poolwatch-extension',
           type: 'POOLWATCH_BROWSER_HELPER_READY',
-          version: '1.1.0',
+          version: '1.2.0',
           capabilities: ['new_api', 'sub2api']
         }
       }))
@@ -216,14 +216,14 @@ describe('渠道向导', () => {
     fireEvent.click(screen.getByRole('button', { name: '更新浏览器助手' }))
     expect(screen.getByText('当前浏览器助手版本较旧，请下载新版并在扩展页面重新加载。')).toBeInTheDocument()
     expect(createAttempt).not.toHaveBeenCalled()
-    expect(screen.getByRole('link', { name: '更新浏览器助手' })).toHaveAttribute('href', '/downloads/poolwatch-browser-helper-v1.1.0.zip')
+    expect(screen.getByRole('link', { name: '更新浏览器助手' })).toHaveAttribute('href', '/downloads/poolwatch-browser-helper-v1.2.0.zip')
   })
 
   it('New API 与 Sub2API 对浏览器助手版本和能力执行相同校验', () => {
     for (const kind of ['new_api', 'sub2api'] as const) {
       expect(supportsBrowserHelper(kind, '', [])).toBe(false)
       expect(supportsBrowserHelper(kind, '1.0.9', ['new_api', 'sub2api'])).toBe(false)
-      expect(supportsBrowserHelper(kind, '1.1.0', ['new_api', 'sub2api'])).toBe(true)
+      expect(supportsBrowserHelper(kind, '1.1.0', ['new_api', 'sub2api'])).toBe(false)
       expect(supportsBrowserHelper(kind, '1.2.0', ['new_api', 'sub2api'])).toBe(true)
     }
     expect(supportsBrowserHelper('new_api', '1.1.0', ['sub2api'])).toBe(false)
@@ -246,7 +246,7 @@ describe('渠道向导', () => {
         data: {
           source: 'poolwatch-extension',
           type: 'POOLWATCH_BROWSER_HELPER_READY',
-          version: '1.1.0',
+          version: '1.2.0',
           capabilities: ['sub2api']
         }
       }))
@@ -308,7 +308,7 @@ describe('渠道向导', () => {
         data: {
           source: 'poolwatch-extension',
           type: 'POOLWATCH_BROWSER_HELPER_READY',
-          version: '1.1.0',
+          version: '1.2.0',
           capabilities: ['new_api', 'sub2api']
         }
       }))
@@ -380,7 +380,7 @@ describe('渠道向导', () => {
           data: {
             source: 'poolwatch-extension',
             type: 'POOLWATCH_BROWSER_HELPER_READY',
-            version: '1.1.0',
+            version: '1.2.0',
             capabilities: ['new_api', 'sub2api']
           }
         }))
@@ -459,7 +459,7 @@ describe('渠道向导', () => {
           data: {
             source: 'poolwatch-extension',
             type: 'POOLWATCH_BROWSER_HELPER_READY',
-            version: '1.1.0',
+            version: '1.2.0',
             capabilities: ['new_api', 'sub2api']
           }
         }))
