@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ArrowRight, Check, Download, ExternalLink, Eye, EyeOff, FlaskConical, Globe, KeyRound, LoaderCircle, Lock, Search, X } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
+import { BrowserAuthRecovery, requiresBrowserAuthorization } from '../components/BrowserAuthRecovery'
 import type { CredentialMode, MetricValue, Target, TargetAuthAttempt, TargetDraft, TargetKind, TestConnectionResult, ThresholdDraft } from '../types'
 import { metricLabels, targetKindLabels } from '../types'
 
@@ -695,11 +696,22 @@ function SecretField({ label, value, show, editing, optional, hideToggle, onChan
   )
 }
 
-function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Target; defaultCheckIntervalMinutes: number }) {
+// 凭据测试记录只保留在当前页面内存中，用于阻止修改凭据后沿用旧的成功结果。
+function authorizationTestKey(draft: TargetDraft): string {
+  return JSON.stringify([draft.kind, draft.baseUrl, draft.credentialMode, draft.cookie, draft.userId, draft.accessToken, draft.browserAuthAttemptId])
+}
+
+function WizardForm({ existing, defaultCheckIntervalMinutes, recoverBrowserSession = false }: { existing?: Target; defaultCheckIntervalMinutes: number; recoverBrowserSession?: boolean }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [draft, setDraft] = useState<TargetDraft>(() => existing ? targetToDraft(existing) : makeDraft('new_api', defaultCheckIntervalMinutes))
-  const [step, setStep] = useState(0)
+  const initialRecovery = recoverBrowserSession && existing?.kind === 'new_api'
+  const [recoveringBrowser, setRecoveringBrowser] = useState(Boolean(initialRecovery))
+  const verifiedAuthorization = useRef('')
+  const [draft, setDraft] = useState<TargetDraft>(() => {
+    const initial = existing ? targetToDraft(existing) : makeDraft('new_api', defaultCheckIntervalMinutes)
+    return initialRecovery ? { ...initial, credentialMode: 'browser_session' } : initial
+  })
+  const [step, setStep] = useState(initialRecovery ? 1 : 0)
   const [error, setError] = useState('')
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null)
   const [detectionMessage, setDetectionMessage] = useState('')
@@ -758,7 +770,12 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
   })
   const testMutation = useMutation({
 		mutationFn: api.testTarget,
-		onSuccess: (result) => {
+    onMutate: () => {
+      verifiedAuthorization.current = ''
+      setTestResult(null)
+    },
+		onSuccess: (result, submittedDraft) => {
+      verifiedAuthorization.current = result.ok ? authorizationTestKey(submittedDraft) : ''
 			setTestResult(result)
 			if (result.metrics?.length) {
 				setDraft((current) => ({
@@ -785,6 +802,12 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
 
   const validateStep = (): boolean => {
     setError('')
+    if (recoveringBrowser && draft.kind === 'new_api' && step >= 1) {
+      const hasBrowserSession = draft.credentialMode === 'browser_session' && (Boolean(draft.browserAuthAttemptId) || Boolean(draft.cookie.trim() && draft.userId.trim()))
+      const hasManagementToken = draft.credentialMode === 'access_token' && Boolean(draft.accessToken.trim() && draft.userId.trim())
+      if (!hasBrowserSession && !hasManagementToken) return setError('请先完成当前站点的网页授权，或填写管理访问令牌和用户 ID。'), false
+      if (step === 3 && verifiedAuthorization.current !== authorizationTestKey(draft)) return setError('请先测试连接成功后再保存；更改登录信息后需要重新测试。'), false
+    }
     if (step === 0) {
       if (!draft.name.trim()) return setError('请填写渠道名称。'), false
       if (!validateUrl(draft.baseUrl)) return setError('请输入有效的 HTTP 或 HTTPS 地址。'), false
@@ -820,8 +843,22 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
     else if (validateStep()) saveMutation.mutate()
   }
 
+  const beginBrowserRecovery = () => {
+    // 只切换本地草稿，授权和连接测试成功前不改写服务器保存的渠道。
+    setDraft((current) => ({ ...current, ...clearedCredentialFields(), credentialMode: 'browser_session', browserAuthAttemptId: '' }))
+    setRecoveringBrowser(true)
+    verifiedAuthorization.current = ''
+    setAuthAttempt(null)
+    setTestResult(null)
+    testMutation.reset()
+    setError('')
+    setStep(1)
+  }
+  const showBrowserRecovery = draft.kind === 'new_api' && (recoveringBrowser || requiresBrowserAuthorization(draft.kind, existing?.lastError) || requiresBrowserAuthorization(draft.kind, testResult?.message) || requiresBrowserAuthorization(draft.kind, testMutation.error?.message))
+
   return (
     <form className="wizard" onSubmit={handleSubmit} noValidate>
+      {showBrowserRecovery ? <BrowserAuthRecovery baseUrl={draft.baseUrl} onRecover={recoveringBrowser ? undefined : beginBrowserRecovery} /> : null}
       <ol className="wizard-steps" aria-label="配置进度">
         {steps.map((label, index) => <li key={label} className={index === step ? 'active' : index < step ? 'done' : ''} aria-current={index === step ? 'step' : undefined}><span>{index < step ? <Check aria-hidden="true" size={16} /> : index + 1}</span><b>{label}</b></li>)}
       </ol>
@@ -840,7 +877,7 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
 
         {step === 1 ? <>
           <div className="panel-heading"><h2 id="step-title-1">登录与认证</h2><p>秘密只发送到服务器并加密保存，页面不会重新显示。</p></div>
-          <div className="form-grid"><AuthenticationFields draft={draft} update={update} existing={existing} attempt={authAttempt} setAttempt={setAuthAttempt} isCurrentAuthTarget={isCurrentAuthTarget} /></div>
+          <div className="form-grid"><AuthenticationFields draft={draft} update={update} existing={recoveringBrowser && existing ? { ...existing, authConfigured: false } : existing} attempt={authAttempt} setAttempt={setAuthAttempt} isCurrentAuthTarget={isCurrentAuthTarget} /></div>
         </> : null}
 
         {step === 2 ? <>
@@ -904,6 +941,8 @@ function WizardForm({ existing, defaultCheckIntervalMinutes }: { existing?: Targ
 
 export default function TargetWizardPage() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
+  const recoverBrowserSession = searchParams.get('auth') === 'browser'
   const [createSettingsReady, setCreateSettingsReady] = useState(false)
   const targetQuery = useQuery({ queryKey: ['target', id], queryFn: () => api.target(id!), enabled: Boolean(id) })
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: !id, refetchOnMount: 'always' })
@@ -918,7 +957,7 @@ export default function TargetWizardPage() {
   return (
     <div className="page-stack narrow-page">
       <PageHeader title={id ? '编辑渠道' : '添加渠道'} description={id ? '秘密字段留空时会保留服务器中原有的值。' : '完成四步设置后，服务器会开始定时检测。'} actions={<Link className="button ghost" to={id ? `/targets/${id}` : '/targets'}><ArrowLeft aria-hidden="true" size={18} />返回</Link>} />
-      <WizardForm key={targetQuery.data?.id ?? 'new'} existing={targetQuery.data} defaultCheckIntervalMinutes={settingsQuery.data?.defaultCheckIntervalMinutes ?? 5} />
+      <WizardForm key={`${targetQuery.data?.id ?? 'new'}:${recoverBrowserSession}`} existing={targetQuery.data} recoverBrowserSession={recoverBrowserSession} defaultCheckIntervalMinutes={settingsQuery.data?.defaultCheckIntervalMinutes ?? 5} />
     </div>
   )
 }

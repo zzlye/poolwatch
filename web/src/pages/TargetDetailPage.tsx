@@ -4,6 +4,7 @@ import { ArrowLeft, CheckCircle2, Clock3, Edit3, ExternalLink, LoaderCircle, Ref
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { AccountPoolView } from '../components/AccountPoolView'
+import { BrowserAuthRecovery, requiresBrowserAuthorization } from '../components/BrowserAuthRecovery'
 import { QuotaAccountPoolView } from '../components/CLIProxyAccountPoolView'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { GroupMultiplierEditor } from '../components/GroupMultiplierEditor'
@@ -129,6 +130,7 @@ export default function TargetDetailPage() {
         <div><span>认证信息</span><strong>{target.authConfigured ? '已配置' : '未配置'}</strong><small>秘密不会回传页面</small></div>
       </section>
       {target.lastError ? <InlineMessage tone="danger">最近错误：{target.lastError}</InlineMessage> : null}
+      {requiresBrowserAuthorization(target.kind, target.lastError) ? <BrowserAuthRecovery baseUrl={target.baseUrl} href={`/targets/${encodeURIComponent(id)}/edit?auth=browser`} /> : null}
 
       <section className="content-section" aria-labelledby="metric-title">
         <div className="section-heading"><div><h2 id="metric-title">当前指标</h2><p>每个指标按自己的单位与阈值判断。</p></div></div>
