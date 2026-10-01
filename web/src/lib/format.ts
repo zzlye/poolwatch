@@ -1,3 +1,11 @@
+import type { MetricValue, TargetStatus } from '../types'
+
+// 未采集到的指标不作为零额度展示；兼容旧服务仍返回零占位值的情况。
+export function formatCurrentMetric(metric: MetricValue, targetStatus: TargetStatus): string {
+  if (metric.status === 'unknown' || !metric.value?.trim()) return targetStatus === 'error' ? '读取失败' : '尚未检测'
+  return formatMetric(metric.value, metric.unit)
+}
+
 export function formatDateTime(value?: string): string {
   if (!value) return '尚未检测'
   const date = new Date(value)
@@ -23,6 +31,7 @@ export function formatRelativeTime(value?: string): string {
 }
 
 export function formatMetric(value: string, unit: string): string {
+  if (!value.trim()) return '暂无数据'
   const number = Number(value)
   if (!Number.isFinite(number)) return `${value} ${unit}`
   const fractionDigits = Math.abs(number) >= 1000 ? 0 : 2

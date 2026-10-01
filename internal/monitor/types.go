@@ -212,6 +212,8 @@ func PublicAccountID(kind TargetKind, stableValue string) string {
 
 // Snapshot 表示一次只读检测结果，不包含任何凭据或原始响应。
 type Snapshot struct {
+	// AccountsWarning 只保存明细读取的安全摘要，与汇总指标分开呈现。
+	AccountsWarning  string          `json:"accounts_warning,omitempty"`
 	TargetID         string          `json:"target_id"`
 	Kind             TargetKind      `json:"kind"`
 	Status           TargetStatus    `json:"status"`

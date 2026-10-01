@@ -84,6 +84,7 @@ export interface AccountQuotaRefreshResult {
 }
 
 export interface Target {
+  accountsWarning?: string
   id: string
   name: string
   kind: TargetKind

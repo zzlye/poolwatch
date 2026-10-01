@@ -1,6 +1,6 @@
 import { ChevronRight, ExternalLink } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { formatMetric, formatRelativeTime, redactHost } from '../lib/format'
+import { formatCurrentMetric, formatRelativeTime, redactHost } from '../lib/format'
 import type { Target } from '../types'
 import { targetKindLabels } from '../types'
 import { StatusPill } from './StatusPill'
@@ -39,7 +39,7 @@ export function TargetTable({ targets }: { targets: Target[] }) {
                   <Link className="target-name-link" to={`/targets/${target.id}`}><strong>{target.name}</strong><span>{targetKindLabels[target.kind]} · {redactHost(target.baseUrl)}</span></Link>
                 </td>
                 <td><StatusPill status={target.enabled ? target.status : 'disabled'} label={target.enabled ? target.statusText : '已停用'} /></td>
-                <td>{metric ? <span className="metric-cell"><strong>{formatMetric(metric.value, metric.unit)}</strong>{metric.threshold !== undefined ? <small>{thresholdLabel(metric.comparison, metric.threshold, metric.unit)}</small> : null}</span> : '暂无指标'}</td>
+                <td>{metric ? <span className="metric-cell"><strong>{formatCurrentMetric(metric, target.status)}</strong>{metric.threshold !== undefined ? <small>{thresholdLabel(metric.comparison, metric.threshold, metric.unit)}</small> : null}</span> : '暂无指标'}</td>
                 <td><span title={target.lastCheckedAt}>{formatRelativeTime(target.lastCheckedAt)}</span></td>
                 <td className="row-action"><Link className="icon-button" to={`/targets/${target.id}`} aria-label={`查看 ${target.name}`}><ChevronRight aria-hidden="true" size={20} /></Link></td>
               </tr>
@@ -60,7 +60,7 @@ export function TargetCards({ targets }: { targets: Target[] }) {
           <article className="target-card" key={target.id}>
             <Link to={`/targets/${target.id}`} aria-label={`查看 ${target.name}`} className="card-link-overlay" />
             <div className="target-card-top"><div><strong>{target.name}</strong><span>{targetKindLabels[target.kind]}</span></div><StatusPill status={target.enabled ? target.status : 'disabled'} /></div>
-            <div className="target-card-metric">{metric ? <><strong>{formatMetric(metric.value, metric.unit)}</strong><span>{metric.label}</span></> : <span>暂无指标</span>}</div>
+            <div className="target-card-metric">{metric ? <><strong>{formatCurrentMetric(metric, target.status)}</strong><span>{metric.label}</span></> : <span>暂无指标</span>}</div>
             <div className="target-card-foot"><span>{formatRelativeTime(target.lastCheckedAt)}</span>{target.topupUrl ? <ExternalLink aria-hidden="true" size={17} /> : <ChevronRight aria-hidden="true" size={18} />}</div>
           </article>
         )

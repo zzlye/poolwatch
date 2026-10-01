@@ -985,6 +985,13 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 
 	snapshot, err := s.dependencies.Store.LatestSnapshot(ctx, target.ID)
 	if err == nil {
+		// 明细诊断独立返回，不能把有效汇总误标为整次检测失败。
+		var detail struct {
+			AccountsWarning string `json:"accountsWarning"`
+		}
+		if json.Unmarshal([]byte(snapshot.DetailJSON), &detail) == nil {
+			result.AccountsWarning = detail.AccountsWarning
+		}
 		var metrics []monitor.Metric
 		if err := json.Unmarshal([]byte(snapshot.MetricsJSON), &metrics); err != nil {
 			return targetResponse{}, err
@@ -1022,7 +1029,7 @@ func (s *Server) mapTarget(ctx context.Context, target store.Target) (targetResp
 		}
 		// 尚未读取到的已配置指标仍需返回，确保编辑页面不会意外关闭监控项。
 		item := metricResponse{
-			Key: meta.Key, Label: meta.Label, Value: "0", Unit: meta.Unit, AlertThreshold: meta.Value,
+			Key: meta.Key, Label: meta.Label, Value: "", Unit: meta.Unit, AlertThreshold: meta.Value,
 			AlertEnabled: thresholdAlertEnabled(meta),
 			Comparison:   string(monitor.NormalizeThresholdComparison(monitor.ThresholdComparison(meta.Comparison))),
 			Status:       string(monitor.TargetStatusUnknown),

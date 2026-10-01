@@ -12,6 +12,9 @@ type chatGPT2APIAdapter struct {
 	http *secureHTTPClient
 }
 
+// 上游只提供全量账号接口；仅为该接口放宽容量，仍限制内存和解压后的总大小。
+const chatGPT2APIAccountsBodyLimit = int64(16 << 20)
+
 func newChatGPT2APIAdapter(client *secureHTTPClient) *chatGPT2APIAdapter {
 	return &chatGPT2APIAdapter{http: client}
 }
@@ -64,6 +67,13 @@ func (adapter *chatGPT2APIAdapter) Check(ctx context.Context, target TargetConfi
 		}
 		details, err := adapter.readAccounts(ctx, session, target)
 		if err != nil {
+			if ErrorClassOf(err) == ErrorClassResponse {
+				// 明细过大或格式异常不应丢掉已读取的汇总；凭据及网络错误继续走原告警流程。
+				snapshot.Status = TargetStatusWarning
+				snapshot.AccountsWarning = "账号明细读取失败：" + err.Error() + "；汇总额度已更新，账号列表保留上次成功读取的结果。"
+				snapshot.Message = strings.TrimPrefix(snapshot.Message+"；"+snapshot.AccountsWarning, "；")
+				return snapshot, nil
+			}
 			return Snapshot{}, err
 		}
 		snapshot.Accounts = details
@@ -79,7 +89,7 @@ func (adapter *chatGPT2APIAdapter) readAccounts(ctx context.Context, session *re
 	headers := make(http.Header)
 	setBearer(headers, target.Credential.AdminKey)
 	var payload any
-	if err := session.doJSON(ctx, http.MethodGet, endpoint, headers, nil, &payload); err != nil {
+	if err := session.doJSONWithLimit(ctx, http.MethodGet, endpoint, headers, nil, &payload, chatGPT2APIAccountsBodyLimit); err != nil {
 		return nil, err
 	}
 	object, ok := payload.(map[string]any)

@@ -173,6 +173,7 @@ type targetGroupPriceResponse struct {
 }
 
 type targetResponse struct {
+	AccountsWarning      string            `json:"accountsWarning,omitempty"`
 	ID                   string            `json:"id"`
 	Name                 string            `json:"name"`
 	Kind                 string            `json:"kind"`

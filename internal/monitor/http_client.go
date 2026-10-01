@@ -248,6 +248,14 @@ func joinTargetURL(baseURL, endpoint string) (string, error) {
 }
 
 func (session *requestSession) doJSON(ctx context.Context, method, rawURL string, headers http.Header, body []byte, output any) error {
+	return session.doJSONWithLimit(ctx, method, rawURL, headers, body, output, session.owner.maxBody)
+}
+
+// 只有明确需要全量账号的内置接口使用独立上限，不改变自定义渠道的默认限制。
+func (session *requestSession) doJSONWithLimit(ctx context.Context, method, rawURL string, headers http.Header, body []byte, output any, limit int64) error {
+	if limit <= 0 || limit > 16<<20 {
+		return checkError(ErrorClassConfig, "读取渠道响应", "响应大小上限配置无效", 0, nil)
+	}
 	if err := session.owner.validateRawURL(ctx, rawURL, session.allowPrivate); err != nil {
 		return err
 	}
@@ -277,11 +285,8 @@ func (session *requestSession) doJSON(ctx context.Context, method, rawURL string
 		return checkError(ErrorClassNetwork, "请求渠道", "无法连接渠道", 0, err)
 	}
 
-	responseBody, readErr := readLimitedBody(response.Body, session.owner.maxBody)
-	_ = response.Body.Close()
-	if readErr != nil {
-		return readErr
-	}
+	defer response.Body.Close()
+	// 优先判断状态码，防止庞大的错误页将认证失败误归类为普通响应问题。
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return checkError(ErrorClassAuth, "验证渠道凭据", "渠道凭据无效或权限不足", response.StatusCode, nil)
 	}
@@ -290,6 +295,10 @@ func (session *requestSession) doJSON(ctx context.Context, method, rawURL string
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return checkError(ErrorClassRemote, "请求渠道", "渠道返回了非成功状态", response.StatusCode, nil)
+	}
+	responseBody, readErr := readLimitedBody(response.Body, limit)
+	if readErr != nil {
+		return readErr
 	}
 	if output == nil {
 		return nil
@@ -309,7 +318,7 @@ func readLimitedBody(body io.Reader, limit int64) ([]byte, error) {
 		return nil, checkError(ErrorClassNetwork, "读取渠道响应", "无法读取渠道响应", 0, err)
 	}
 	if int64(len(data)) > limit {
-		return nil, checkError(ErrorClassResponse, "读取渠道响应", "渠道响应超过 1 MB 限制", 0, nil)
+		return nil, checkError(ErrorClassResponse, "读取渠道响应", fmt.Sprintf("渠道响应超过 %g MB 限制", float64(limit)/(1<<20)), 0, nil)
 	}
 	return data, nil
 }

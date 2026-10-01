@@ -10,7 +10,7 @@ import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '.
 import { GroupMultiplierEditor } from '../components/GroupMultiplierEditor'
 import { LineChart } from '../components/LineChart'
 import { StatusPill } from '../components/StatusPill'
-import { formatDateTime, formatMetric, formatRelativeTime } from '../lib/format'
+import { formatCurrentMetric, formatDateTime, formatMetric, formatRelativeTime } from '../lib/format'
 import { metricLabels, targetKindLabels, type MetricKey, type MetricValue, type Target, type ThresholdComparison } from '../types'
 
 function thresholdComparison(metric?: MetricValue): ThresholdComparison {
@@ -137,8 +137,8 @@ export default function TargetDetailPage() {
         <div className="metric-grid">
           {target.metrics.map((metric) => (
             <button key={metric.key} type="button" className={selectedMetric === metric.key ? 'metric-card selected' : 'metric-card'} onClick={() => setSelectedMetric(metric.key)} aria-pressed={selectedMetric === metric.key}>
-              <span><strong>{metric.label}</strong><StatusPill status={metric.status} /></span>
-              <b>{formatMetric(metric.value, metric.unit)}</b>
+              <span><strong>{metric.label}</strong><StatusPill status={metric.status === 'unknown' && target.status === 'error' ? 'error' : metric.status} label={metric.status === 'unknown' && target.status === 'error' ? '读取失败' : undefined} /></span>
+              <b>{formatCurrentMetric(metric, target.status)}</b>
               <small>{metric.threshold !== undefined ? `告警条件 ${thresholdSymbol(thresholdComparison(metric))} ${metric.threshold} ${metric.unit}` : '仅记录状态，不设置额度告警'}</small>
             </button>
           ))}
@@ -160,7 +160,8 @@ export default function TargetDetailPage() {
       {target.kind === 'chatgpt2api' ? (
         <section className="content-section" aria-labelledby="account-title">
           <div className="section-heading"><div><h2 id="account-title">号池账号状态</h2><p>仅显示脱敏邮箱、类型、状态、额度与恢复时间。</p></div></div>
-          {target.accounts?.length ? <AccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description="配置管理员密钥后才能读取只读脱敏明细。" />}
+          {target.accountsWarning ? <InlineMessage tone="warning">{target.accountsWarning}</InlineMessage> : null}
+          {target.accounts?.length ? <AccountPoolView accounts={target.accounts} /> : <EmptyState title="暂无账号明细" description={target.accountsWarning ? '账号明细暂未获取，汇总指标仍按本次检测结果展示。' : '配置管理员密钥后才能读取只读脱敏明细。'} />}
         </section>
       ) : null}
 

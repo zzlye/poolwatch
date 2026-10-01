@@ -77,7 +77,7 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	if err != nil {
 		return err
 	}
-	detailJSON, err := json.Marshal(map[string]string{"message": truncate(snapshot.Message, 500)})
+	detailJSON, err := json.Marshal(map[string]string{"message": truncate(snapshot.Message, 500), "accountsWarning": truncate(snapshot.AccountsWarning, 500)})
 	if err != nil {
 		return err
 	}
@@ -90,8 +90,9 @@ func (e *Engine) HandleSuccess(ctx context.Context, target store.Target, snapsho
 	}
 	supportsAccounts := target.Kind == string(monitor.TargetKindChatGPT2API) ||
 		target.Kind == string(monitor.TargetKindCLIProxyAPI) || target.Kind == string(monitor.TargetKindSub2API)
-	// Sub2API 钱包检测成功但可选号池读取失败时 Accounts 为 nil，必须保留上一次号池数据。
-	shouldReplaceAccounts := supportsAccounts && !(target.Kind == string(monitor.TargetKindSub2API) && snapshot.Accounts == nil)
+	// 可选明细读取失败时保留上次结果；成功返回的空切片才表示号池已经清空。
+	preserveAccounts := snapshot.Accounts == nil && (target.Kind == string(monitor.TargetKindSub2API) || target.Kind == string(monitor.TargetKindChatGPT2API))
+	shouldReplaceAccounts := supportsAccounts && !preserveAccounts
 	if shouldReplaceAccounts {
 		accounts := sanitizedAccounts(target.Kind, target.ID, snapshot.Accounts, observedAt)
 		if target.Kind == string(monitor.TargetKindCLIProxyAPI) || target.Kind == string(monitor.TargetKindSub2API) {
