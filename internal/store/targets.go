@@ -83,6 +83,10 @@ func (s *Store) UpdateTargetAndMonitoring(ctx context.Context, target Target, mo
 		return fmt.Errorf("渠道监控更新模式无效")
 	}
 	if resetMultiplierBaseline && mode != TargetMonitoringResetHistory {
+		// 手动更换登录身份后，独立价格监控也需要重新建立基准，避免跨账号误报。
+		if _, err := tx.ExecContext(ctx, `UPDATE model_price_monitors SET current_json='[]',previous_json='[]',missing=0,last_error='',last_checked_at='',changed_at='' WHERE target_id=?`, target.ID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE group_multiplier_monitors SET
 			current_multiplier = '', previous_multiplier = '', missing = 0, last_error = '',
 			last_checked_at = NULL, last_changed_at = NULL, updated_at = ? WHERE target_id = ?`,
@@ -186,6 +190,7 @@ func resetTargetMonitoringTx(ctx context.Context, tx *sql.Tx, id string, updated
 		`DELETE FROM alerts WHERE target_id = ?`,
 		`DELETE FROM chat_accounts WHERE target_id = ?`,
 		`DELETE FROM group_multiplier_monitors WHERE target_id = ?`,
+		`DELETE FROM model_price_monitors WHERE target_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, query, id); err != nil {
 			return fmt.Errorf("重置渠道历史失败: %w", err)

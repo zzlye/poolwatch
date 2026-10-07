@@ -14,7 +14,7 @@ export type TargetStatus = 'healthy' | 'warning' | 'error' | 'disabled' | 'unkno
 
 export type AccountQuotaState = 'available' | 'unavailable' | 'unsupported'
 
-export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered' | 'multiplier_changed'
+export type AlertType = 'threshold' | 'credential' | 'unreachable' | 'recovered' | 'multiplier_changed' | 'price_changed'
 
 export type MultiplierStatus = 'stable' | 'changed' | 'missing' | 'unknown'
 
@@ -333,4 +333,14 @@ export const metricLabels: Record<MetricKey, string> = {
   limited_accounts: '限流账号',
   error_accounts: '异常账号',
   disabled_accounts: '禁用账号'
+}
+
+// 独立价格监控保留十进制金额及原币种，不与倍率选择共用状态。
+export interface PricePoint { key: string; label: string; range: string; value: string; unit: string }
+export interface PriceCandidate { name: string; prices: PricePoint[] }
+export interface ModelPriceCatalog { groupKey: string; groupName: string; multiplier: string; models: PriceCandidate[]; notice?: string }
+export interface ModelPriceMonitor {
+  targetId: string; groupKey: string; groupName: string; modelName: string
+  prices: PricePoint[]; previous: PricePoint[]; missing: boolean; lastError: string
+  lastCheckedAt: string; changedAt: string
 }

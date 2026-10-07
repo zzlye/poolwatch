@@ -110,6 +110,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			metrics_json TEXT NOT NULL,
 			detail_json TEXT NOT NULL DEFAULT '{}'
 		)`,
+		`CREATE TABLE IF NOT EXISTS model_price_monitors (
+			target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+			group_key TEXT NOT NULL, group_name TEXT NOT NULL, model_name TEXT NOT NULL,
+			current_json TEXT NOT NULL DEFAULT '[]', previous_json TEXT NOT NULL DEFAULT '[]',
+			missing INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+			last_checked_at TEXT NOT NULL DEFAULT '', changed_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(target_id,group_key,model_name)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_target_time ON snapshots(target_id, observed_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS alerts (
 			id TEXT PRIMARY KEY,

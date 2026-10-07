@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, BellRing, Check, CheckCircle2, KeyRound, Percent, RefreshCw, ServerCrash } from 'lucide-react'
+import { AlertTriangle, BadgeDollarSign, BellRing, Check, CheckCircle2, KeyRound, Percent, RefreshCw, ServerCrash } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { EmptyState, ErrorView, InlineMessage, LoadingView, PageHeader } from '../components/Common'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
 import type { Alert, AlertType } from '../types'
 
-const typeLabels: Record<AlertType, string> = { threshold: '额度不足', credential: '凭据失效', unreachable: '连接失败', recovered: '状态恢复', multiplier_changed: '倍率变更' }
-const typeIcons = { threshold: AlertTriangle, credential: KeyRound, unreachable: ServerCrash, recovered: CheckCircle2, multiplier_changed: Percent }
+const typeLabels: Record<AlertType, string> = { threshold: '额度不足', credential: '凭据失效', unreachable: '连接失败', recovered: '状态恢复', multiplier_changed: '倍率变更', price_changed: '模型价格变更' }
+const typeIcons = { threshold: AlertTriangle, credential: KeyRound, unreachable: ServerCrash, recovered: CheckCircle2, multiplier_changed: Percent, price_changed: BadgeDollarSign }
 
 export default function AlertsPage() {
   const queryClient = useQueryClient()
@@ -47,12 +47,12 @@ export default function AlertsPage() {
           const focused = params.get('focus') === alert.id
           return <article id={`alert-${alert.id}`} className={`alert-item severity-${alert.severity}${focused ? ' focused' : ''}`} key={alert.id}>
             <span className="alert-icon"><Icon aria-hidden="true" /></span>
-            <div className="alert-main"><div className="alert-title-line"><span><strong>{alert.title}</strong><small>{typeLabels[alert.type]}</small></span><time dateTime={alert.createdAt} title={formatDateTime(alert.createdAt)}>{formatRelativeTime(alert.createdAt)}</time></div><p>{alert.message}</p><div className="alert-meta"><Link to={alert.type === 'multiplier_changed' ? `/multipliers?target=${encodeURIComponent(alert.targetId)}` : `/targets/${alert.targetId}`}>{alert.targetName}</Link><span>{alert.status === 'open' ? '未处理' : alert.status === 'acknowledged' ? '已知晓' : alert.type === 'multiplier_changed' ? '已记录' : '已恢复'}</span>{alert.resolvedAt ? <span>恢复于 {formatDateTime(alert.resolvedAt)}</span> : null}</div></div>
+            <div className="alert-main"><div className="alert-title-line"><span><strong>{alert.title}</strong><small>{typeLabels[alert.type]}</small></span><time dateTime={alert.createdAt} title={formatDateTime(alert.createdAt)}>{formatRelativeTime(alert.createdAt)}</time></div><p>{alert.message}</p><div className="alert-meta"><Link to={alert.type === 'price_changed' ? `/prices?target=${encodeURIComponent(alert.targetId)}` : alert.type === 'multiplier_changed' ? `/multipliers?target=${encodeURIComponent(alert.targetId)}` : `/targets/${alert.targetId}`}>{alert.targetName}</Link><span>{alert.status === 'open' ? '未处理' : alert.status === 'acknowledged' ? '已知晓' : (alert.type === 'multiplier_changed' || alert.type === 'price_changed') ? '已记录' : '已恢复'}</span>{alert.resolvedAt ? <span>恢复于 {formatDateTime(alert.resolvedAt)}</span> : null}</div></div>
             {alert.status === 'open' ? <button className="button secondary compact" type="button" disabled={acknowledgeMutation.isPending} onClick={() => acknowledgeMutation.mutate(alert.id)}><Check aria-hidden="true" size={17} />标记已知晓</button> : <span className="alert-state"><CheckCircle2 aria-hidden="true" size={17} />已记录</span>}
           </article>
         })}</div> : <EmptyState title="没有匹配的告警" description="当前筛选条件下没有事件。" />}
       </section>
-      <div className="alert-rule-note"><BellRing aria-hidden="true" size={18} /><p><strong>通知规则</strong>额度首次达到阈值立即通知；已选分组倍率变化立即通知且相同值不重复提醒；凭据失效立即通知；连接连续失败三次才通知；恢复后发送一次恢复消息。</p></div>
+      <div className="alert-rule-note"><BellRing aria-hidden="true" size={18} /><p><strong>通知规则</strong>额度首次达到阈值立即通知；已选分组倍率或模型价格变化立即通知且相同值不重复提醒；凭据失效立即通知；连接连续失败三次才通知；恢复后发送一次恢复消息。</p></div>
     </div>
   )
 }

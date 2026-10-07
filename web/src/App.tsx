@@ -13,6 +13,7 @@ const TargetsPage = lazy(() => import('./pages/TargetsPage'))
 const TargetWizardPage = lazy(() => import('./pages/TargetWizardPage'))
 const TargetDetailPage = lazy(() => import('./pages/TargetDetailPage'))
 const MultiplierPage = lazy(() => import('./pages/MultiplierPage'))
+const ModelPricesPage = lazy(() => import('./pages/ModelPricesPage'))
 const AlertsPage = lazy(() => import('./pages/AlertsPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 
@@ -54,6 +55,7 @@ function ApplicationRoutes() {
           <Route path="targets/:id" element={<TargetDetailPage />} />
           <Route path="targets/:id/edit" element={<TargetWizardPage />} />
           <Route path="multipliers" element={<MultiplierPage />} />
+          <Route path="prices" element={<ModelPricesPage />} />
           <Route path="alerts" element={<AlertsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -102,7 +102,7 @@ try:
     tables = {row[0] for row in connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     )}
-    required_tables = {"alert_notification_deliveries"}
+    required_tables = {"alert_notification_deliveries", "model_price_monitors"}
     missing_tables = sorted(required_tables - tables)
     if missing_tables:
         raise SystemExit("数据库迁移缺少数据表：" + ", ".join(missing_tables))
@@ -112,7 +112,7 @@ try:
     if "destination_id" not in delivery_columns:
         raise SystemExit("通知投递状态尚未升级为按设备记录")
     counts = {}
-    for table in ("admins", "targets", "alerts", "push_subscriptions", "alert_notification_deliveries"):
+    for table in ("admins", "targets", "alerts", "push_subscriptions", "alert_notification_deliveries", "model_price_monitors"):
         counts[table] = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print("数据计数：" + ", ".join(f"{key}={value}" for key, value in counts.items()))
 finally:
@@ -124,6 +124,15 @@ route_status="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -X POST \
   -H 'Content-Type: application/json' --data '{"accountIds":[]}')"
 if [ "$route_status" != "401" ]; then
   echo "账号额度刷新接口未生效，状态码：$route_status" >&2
+  rollback
+  exit 1
+fi
+
+# 新价格接口必须已经注册，同时保持原有管理员会话保护。
+price_route_status="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:$app_port/api/targets/test/model-prices")"
+if [ "$price_route_status" != "401" ]; then
+  echo "模型价格接口未生效，状态码：$price_route_status" >&2
   rollback
   exit 1
 fi

@@ -161,7 +161,7 @@ function GroupPricePanel({ targetId, group, expanded }: { targetId: string; grou
   return (
     <section className="group-price-panel" aria-labelledby={headingId}>
       <div className="group-price-heading">
-        <div><h3 id={headingId}>{query.data.groupName}模型价格</h3><p>分组倍率 {multiplierText(query.data.multiplier)} · 价格仅展示，不参与告警。</p></div>
+        <div><h3 id={headingId}>{query.data.groupName}模型价格</h3><p>分组倍率 {multiplierText(query.data.multiplier)} · 此处仅展示价格，<Link to={`/prices?target=${encodeURIComponent(targetId)}`}>设置独立模型价格监控</Link>。</p></div>
         <label className="search-field group-price-search"><span className="sr-only">搜索模型或计费方式</span><Search aria-hidden="true" size={18} /><input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setRequestedPage(1) }} placeholder="搜索模型或计费方式" /></label>
       </div>
       {query.data.notice ? <InlineMessage>{query.data.notice}</InlineMessage> : null}

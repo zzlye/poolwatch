@@ -21,6 +21,8 @@ export function useRealtime(enabled: boolean): void {
     }
     const refreshTargetConfiguration = () => {
       refreshTargets()
+      void queryClient.invalidateQueries({ queryKey: ['model-prices'] })
+      void queryClient.invalidateQueries({ queryKey: ['model-price-catalog'] })
       // 渠道配置变化可能关闭某个告警指标，告警页也要同步刷新。
       void queryClient.invalidateQueries({ queryKey: ['alerts'] })
     }
@@ -36,6 +38,11 @@ export function useRealtime(enabled: boolean): void {
       void queryClient.invalidateQueries({ queryKey: ['group-multipliers'] })
       // 模型价格按当前分组倍率计算，倍率变化后不能继续展示旧缓存。
       void queryClient.invalidateQueries({ queryKey: ['group-prices'] })
+      refreshAlerts()
+    })
+    source.addEventListener('price.updated', () => {
+      void queryClient.invalidateQueries({ queryKey: ['model-prices'] })
+      void queryClient.invalidateQueries({ queryKey: ['model-price-catalog'] })
       refreshAlerts()
     })
     source.addEventListener('settings.updated', refreshSettings)

@@ -35,6 +35,7 @@ type Service struct {
 	onError             func(error)
 	onSnapshot          func(string)
 	onMultiplier        func(string)
+	onPrice             func(string)
 	wait                sync.WaitGroup
 }
 
@@ -45,7 +46,7 @@ func NewService(database *store.Store, vault *secure.Vault, runner monitor.Runne
 		allowPrivateTargets: allowPrivateTargets, checkTimeout: 20 * time.Second, tickInterval: 15 * time.Second,
 		semaphore: make(chan struct{}, 4), running: make(map[string]struct{}),
 		now: func() time.Time { return time.Now().UTC() }, onError: func(error) {},
-		onSnapshot: func(string) {}, onMultiplier: func(string) {},
+		onSnapshot: func(string) {}, onMultiplier: func(string) {}, onPrice: func(string) {},
 	}
 }
 
@@ -479,6 +480,14 @@ func (s *Service) runTarget(ctx context.Context, targetID string) error {
 		return nil
 	}
 	target = currentTarget
+	// 独立价格检测在余额和倍率流程之后运行，两种监控的失败互不阻断。
+	defer func() {
+		if ctx.Err() == nil {
+			if err := s.checkModelPricesUnlocked(ctx, &target); err != nil {
+				s.onError(errors.New("模型价格检测未全部成功，请查看价格页面"))
+			}
+		}
+	}()
 	if checkErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

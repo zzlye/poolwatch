@@ -121,6 +121,11 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("PUT /api/targets/{id}/group-multipliers", s.protected(http.HandlerFunc(s.handleSaveGroupMultipliers)))
 	mux.Handle("POST /api/targets/{id}/group-multipliers/check", s.protected(http.HandlerFunc(s.handleCheckGroupMultipliers)))
 	mux.Handle("GET /api/targets/{id}/group-prices", s.protected(http.HandlerFunc(s.handleGroupPrices)))
+	mux.Handle("GET /api/targets/{id}/model-prices", s.protected(http.HandlerFunc(s.handleModelPrices)))
+	mux.Handle("PUT /api/targets/{id}/model-prices", s.protected(http.HandlerFunc(s.handleModelPrices)))
+	mux.Handle("POST /api/targets/{id}/model-prices/groups", s.protected(http.HandlerFunc(s.handleModelPrices)))
+	mux.Handle("GET /api/targets/{id}/model-prices/catalog", s.protected(http.HandlerFunc(s.handleModelPrices)))
+	mux.Handle("POST /api/targets/{id}/model-prices/check", s.protected(http.HandlerFunc(s.handleModelPrices)))
 	mux.Handle("GET /api/targets/{id}/history", s.protected(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("POST /api/checks", s.protected(http.HandlerFunc(s.handleCheckAll)))
 

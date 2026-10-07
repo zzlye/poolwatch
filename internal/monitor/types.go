@@ -83,6 +83,7 @@ const (
 	AlertTypeConnectivity      AlertType = "unreachable"
 	AlertTypeRecovered         AlertType = "recovered"
 	AlertTypeMultiplierChanged AlertType = "multiplier_changed"
+	AlertTypePriceChanged      AlertType = "price_changed"
 )
 
 // AuthMode 表示自定义 HTTP 渠道的认证方式。

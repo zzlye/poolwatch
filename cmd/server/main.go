@@ -76,6 +76,9 @@ func run(logger *slog.Logger) error {
 	schedulerService.SetMultiplierHandler(func(targetID string) {
 		eventHub.Publish("multiplier.updated", map[string]string{"targetId": targetID})
 	})
+	schedulerService.SetPriceHandler(func(targetID string) {
+		eventHub.Publish("price.updated", map[string]string{"targetId": targetID})
+	})
 	staticHandler, err := webui.NewHandler()
 	if err != nil {
 		return err

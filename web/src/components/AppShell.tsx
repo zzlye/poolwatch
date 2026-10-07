@@ -1,4 +1,4 @@
-import { Bell, Gauge, LogOut, Percent, RadioTower, Settings, ShieldCheck } from 'lucide-react'
+import { BadgeDollarSign, Bell, Gauge, LogOut, Percent, RadioTower, Settings, ShieldCheck } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router-dom'
 import type { BootstrapState } from '../types'
 
@@ -6,6 +6,7 @@ const navigation = [
   { to: '/', label: '总览', icon: Gauge, end: true },
   { to: '/targets', label: '渠道', icon: RadioTower, end: false },
   { to: '/multipliers', label: '倍率', icon: Percent, end: false },
+  { to: '/prices', label: '模型价格', icon: BadgeDollarSign, end: false },
   { to: '/alerts', label: '告警', icon: Bell, end: false },
   { to: '/settings', label: '设置', icon: Settings, end: false }
 ]

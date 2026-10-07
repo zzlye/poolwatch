@@ -225,6 +225,13 @@ func (e *Engine) NotifyMultiplierChange(ctx context.Context, target store.Target
 	e.notify(ctx, *alert, target.Name, "warning", false)
 }
 
+// NotifyPriceChange 发送已经与模型价格基准原子落库的变化事件。
+func (e *Engine) NotifyPriceChange(ctx context.Context, target store.Target, alert *store.Alert) {
+	if alert != nil && alert.Type == string(monitor.AlertTypePriceChanged) {
+		e.notify(ctx, *alert, target.Name, "warning", false)
+	}
+}
+
 func (e *Engine) openThreshold(ctx context.Context, target store.Target, metric monitor.Metric, now time.Time) error {
 	title := metric.Label + "不足"
 	message := fmt.Sprintf("当前%s为 %s %s，已达到或低于阈值 %s %s。", metric.Label,
