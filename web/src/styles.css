@@ -4031,6 +4031,8 @@ tbody tr:hover {
 }
 /* 模型价格复用渠道折叠摘要；价格与配置分离，桌面使用紧凑行。 */
 .price-channel-content[hidden] { display: none; }
+/* 状态筛选只隐藏卡片，保留组件内尚未保存的编辑内容。 */
+.price-channel-details[hidden] { display: none; }
 .price-group-tabs { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .price-group-tab { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; max-width: 100%; padding: 7px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); text-align: left; }
 .price-group-tab strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }

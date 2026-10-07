@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -99,6 +99,48 @@ describe('独立模型价格监控', () => {
 
 
 describe('渠道折叠价格总览', () => {
+  it('按价格状态筛选渠道，并随缓存更新同步筛选结果', async () => {
+    const names = ['稳定站', '变化站', '异常站', '待检测站', '未配置站', '读取失败站']
+    vi.spyOn(api, 'targets').mockResolvedValue(names.map((name, i) => ({ ...target, id: `status-${i}`, name, kind: i % 2 ? 'sub2api' : 'new_api' })))
+    vi.spyOn(api, 'modelPrices').mockImplementation(async (id) => {
+      if (id === 'status-5') throw new Error('服务暂不可用')
+      if (id === 'status-4') return []
+      return [{ ...saved, targetId: id, changedAt: id === 'status-1' ? saved.lastCheckedAt : '', lastError: id === 'status-2' ? '上游读取失败' : '', prices: id === 'status-3' ? [] : saved.prices }]
+    })
+    const client = renderPage('/prices')
+    const filter = await screen.findByRole('combobox', { name: '筛选价格状态' })
+    await screen.findByText('读取失败')
+    for (const [status, expected] of [['stable', ['稳定站']], ['changed', ['变化站']], ['error', ['异常站', '读取失败站']], ['loading', ['待检测站']], ['unconfigured', ['未配置站']]] as const) {
+      fireEvent.change(filter, { target: { value: status } })
+      for (const name of names) {
+        const card = screen.getByText(name).closest('details')!
+        if ((expected as readonly string[]).includes(name)) expect(card).not.toHaveAttribute('hidden')
+        else expect(card).toHaveAttribute('hidden')
+      }
+    }
+    fireEvent.change(filter, { target: { value: 'changed' } })
+    // SSE 和手动刷新均更新同一个缓存，状态筛选应立即跟随变化。
+    act(() => client.setQueryData(['model-prices', 'status-1'], [{ ...saved, targetId: 'status-1' }]))
+    expect(await screen.findByText('没有匹配状态的渠道')).toBeInTheDocument()
+    fireEvent.change(filter, { target: { value: 'all' } })
+    expect(screen.queryByText('没有匹配状态的渠道')).not.toBeInTheDocument()
+    expect(api.modelPriceCatalog).not.toHaveBeenCalled()
+    expect(api.discoverPriceGroups).not.toHaveBeenCalled()
+  })
+  it('状态筛选隐藏渠道后恢复时保留展开状态和未保存选择', async () => {
+    vi.spyOn(api, 'modelPrices').mockResolvedValue([saved])
+    const save = vi.spyOn(api, 'saveModelPrices')
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: '管理模型' }))
+    fireEvent.click(await screen.findByRole('checkbox', { name: '监控 model-a' }))
+    const filter = screen.getByRole('combobox', { name: '筛选价格状态' })
+    fireEvent.change(filter, { target: { value: 'error' } })
+    expect(screen.queryByRole('checkbox', { name: '监控 model-a' })).not.toBeInTheDocument()
+    fireEvent.change(filter, { target: { value: 'all' } })
+    expect(screen.getByRole('checkbox', { name: '监控 model-a' })).not.toBeChecked()
+    expect(document.getElementById('price-channel-price-1')).toHaveAttribute('open')
+    expect(save).not.toHaveBeenCalled()
+  })
   it('默认并列显示全部渠道摘要且不读取上游价格目录', async () => {
     vi.spyOn(api, 'targets').mockResolvedValue([target, { ...target, id: 'sub-2', name: '第二站', kind: 'sub2api' }])
     vi.spyOn(api, 'modelPrices').mockImplementation(async (id) => id === target.id ? [saved] : [])

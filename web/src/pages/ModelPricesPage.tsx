@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { AlertCircle, BellRing, CheckCircle2, ChevronDown, CircleOff, Clock3, RefreshCw, Save, Search, Settings2 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
@@ -40,10 +40,24 @@ function modelState(item?: ModelPriceMonitor) {
   return { label: '监控中', className: 'is-stable', icon: CheckCircle2 }
 }
 
-function PriceChannel({ target, expanded, onToggle }: { target: Target; expanded: boolean; onToggle: (open: boolean) => void }) {
+type PriceStatus = 'stable' | 'changed' | 'error' | 'loading' | 'unconfigured'
+const priceStatusLabels: Record<PriceStatus, string> = { stable: '稳定', changed: '有变化', error: '检测异常', loading: '待检测', unconfigured: '未配置' }
+
+// 摘要和筛选共用同一判定，异常优先于变化，避免渠道显示状态与筛选结果不一致。
+function channelState(state: UseQueryResult<ModelPriceMonitor[], Error>) {
+  const records = state.data ?? []
+  const key: PriceStatus = state.isError || records.some((r) => r.lastError || r.missing) ? 'error'
+    : state.isPending ? 'loading'
+      : records.some((r) => r.changedAt && r.changedAt === r.lastCheckedAt) ? 'changed'
+        : records.some((r) => !r.prices.length) ? 'loading'
+          : records.length ? 'stable' : 'unconfigured'
+  const icons = { stable: CheckCircle2, changed: BellRing, error: AlertCircle, loading: Clock3, unconfigured: CircleOff }
+  return { key, label: state.isPending ? '正在读取' : state.isError ? '读取失败' : priceStatusLabels[key], className: `is-${key}`, icon: icons[key] }
+}
+
+function PriceChannel({ target, state, hidden, expanded, onToggle }: { target: Target; state: UseQueryResult<ModelPriceMonitor[], Error>; hidden: boolean; expanded: boolean; onToggle: (open: boolean) => void }) {
   const client = useQueryClient()
   // 折叠摘要只读本地保存的状态；浏览及展开不会自动向上游请求模型价格。
-  const state = useQuery({ queryKey: ['model-prices', target.id], queryFn: () => api.modelPrices(target.id) })
   const [editing, setEditing] = useState(false)
   const [discovered, setDiscovered] = useState<{ key: string; name: string }[]>([])
   const [requestedGroup, setRequestedGroup] = useState('')
@@ -104,15 +118,10 @@ function PriceChannel({ target, expanded, onToggle }: { target: Target; expanded
   const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const records = state.data ?? []
   const lastCheckedAt = records.reduce((latest, item) => item.lastCheckedAt > latest ? item.lastCheckedAt : latest, '')
-  const summaryState = state.isPending ? { label: '正在读取', className: 'is-loading', icon: Clock3 }
-    : state.isError ? { label: '读取失败', className: 'is-error', icon: AlertCircle }
-      : records.some((r) => r.lastError || r.missing) ? { label: '检测异常', className: 'is-error', icon: AlertCircle }
-        : records.some((r) => r.changedAt && r.changedAt === r.lastCheckedAt) ? { label: '有变化', className: 'is-changed', icon: BellRing }
-          : records.some((r) => !r.prices.length) ? { label: '待检测', className: 'is-loading', icon: Clock3 }
-            : records.length ? { label: '稳定', className: 'is-stable', icon: CheckCircle2 } : { label: '未配置', className: 'is-unconfigured', icon: CircleOff }
+  const summaryState = channelState(state)
   const SummaryIcon = summaryState.icon
 
-  return <details className="multiplier-channel-details price-channel-details" id={`price-channel-${encodeURIComponent(target.id)}`} open={expanded} onToggle={(event) => onToggle(event.currentTarget.open)}>
+  return <details className="multiplier-channel-details price-channel-details" hidden={hidden} id={`price-channel-${encodeURIComponent(target.id)}`} open={expanded} onToggle={(event) => onToggle(event.currentTarget.open)}>
     <summary aria-label={`${target.name}模型价格`}>
       <span className="multiplier-channel-identity"><strong>{target.name}</strong><small>{targetKindLabels[target.kind]} · {target.enabled ? '定时检测中' : '已暂停'}{dirty ? ' · 选择未保存' : ''}</small></span>
       <span className={`multiplier-channel-stat multiplier-channel-health ${summaryState.className}`}><small>价格状态</small><b><SummaryIcon size={16} aria-hidden="true" />{summaryState.label}</b></span>
@@ -180,8 +189,13 @@ export default function ModelPricesPage() {
   const [params] = useSearchParams()
   const requestedTargetId = params.get('target') ?? ''
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(requestedTargetId ? [requestedTargetId] : []))
+  const [statusFilter, setStatusFilter] = useState<PriceStatus | 'all'>('all')
   const targets = useQuery({ queryKey: ['targets'], queryFn: api.targets })
   const supported = useMemo(() => (targets.data ?? []).filter((v) => v.kind === 'new_api' || v.kind === 'sub2api'), [targets.data])
+  // 所有渠道共享已有价格缓存，筛选不额外读取上游，也能跟随 SSE 和手动刷新更新。
+  const states = useQueries({ queries: supported.map((target) => ({ queryKey: ['model-prices', target.id], queryFn: () => api.modelPrices(target.id) })) })
+  const counts = states.reduce((result, state) => { result[channelState(state).key]++; return result }, { stable: 0, changed: 0, error: 0, loading: 0, unconfigured: 0 })
+  const visibleCount = statusFilter === 'all' ? supported.length : counts[statusFilter]
   useEffect(() => {
     if (!requestedTargetId || !supported.some((v) => v.id === requestedTargetId)) return
     setExpanded((current) => current.has(requestedTargetId) ? current : new Set([...current, requestedTargetId]))
@@ -189,14 +203,25 @@ export default function ModelPricesPage() {
     return () => window.cancelAnimationFrame(frame)
   }, [requestedTargetId, supported])
   return <div className="page-stack multiplier-page model-prices-page"><PageHeader title="模型价格" description="按渠道查看已监控分组与模型价格，价格变化时提醒。" />
-    {targets.isPending ? <LoadingView /> : targets.isError ? <ErrorView message={targets.error.message} onRetry={() => void targets.refetch()} /> : supported.length ? <section className="multiplier-channel-list" aria-label="渠道模型价格列表">
-      {supported.map((target) => <PriceChannel key={target.id} target={target} expanded={expanded.has(target.id)} onToggle={(open) => setExpanded((current) => {
+    {targets.isPending ? <LoadingView /> : targets.isError ? <ErrorView message={targets.error.message} onRetry={() => void targets.refetch()} /> : supported.length ? <>
+      <div className="price-list-toolbar">
+        <label className="compact-field"><span>价格状态</span><select aria-label="筛选价格状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as PriceStatus | 'all')}>
+          <option value="all">全部状态（{supported.length}）</option>
+          {(Object.keys(priceStatusLabels) as PriceStatus[]).map((status) => <option key={status} value={status}>{priceStatusLabels[status]}（{counts[status]}）</option>)}
+        </select></label>
+        <span className="price-muted" role="status">显示 {visibleCount} / {supported.length} 个渠道</span>
+      </div>
+      <section className="multiplier-channel-list" aria-label="渠道模型价格列表">
+      {/* 使用隐藏而非卸载，切换状态时保留展开位置及未保存的模型选择。 */}
+      {supported.map((target, index) => <PriceChannel key={target.id} target={target} state={states[index]} hidden={statusFilter !== 'all' && channelState(states[index]).key !== statusFilter} expanded={expanded.has(target.id)} onToggle={(open) => setExpanded((current) => {
         if (current.has(target.id) === open) return current
         const next = new Set(current)
         if (open) next.add(target.id)
         else next.delete(target.id)
         return next
       })} />)}
-    </section> : <EmptyState title="还没有支持的渠道" description="先添加 New API 或 Sub2API 渠道，即可配置独立模型价格监控。" action={<Link className="button primary" to="/targets/new">添加渠道</Link>} />}
+    </section>
+    {!visibleCount ? <EmptyState title="没有匹配状态的渠道" description="切换价格状态，查看其他渠道。" action={<button type="button" className="button secondary" onClick={() => setStatusFilter('all')}>显示全部渠道</button>} /> : null}
+    </> : <EmptyState title="还没有支持的渠道" description="先添加 New API 或 Sub2API 渠道，即可配置独立模型价格监控。" action={<Link className="button primary" to="/targets/new">添加渠道</Link>} />}
   </div>
 }
