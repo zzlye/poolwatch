@@ -41,6 +41,12 @@ func TestNewAPI展示所选分组全部可靠价格并跳过损坏模型(t *test
 				"model_name": "image-request", "quota_type": 1, "enable_groups": []string{"all"}, "model_price": "0.04",
 			},
 			map[string]any{
+				"model_name": "video-second", "quota_type": 2, "price_unit": "second", "enable_groups": []string{"vip"},
+				"model_price": "0.3", "video_per_second_pricing": map[string]any{
+					"prices": map[string]any{"720p": "0.3", "1080p": "0.55"},
+				},
+			},
+			map[string]any{
 				"model_name": "broken", "quota_type": 0, "enable_groups": []string{"vip"},
 				"model_ratio": "1e999999", "completion_ratio": "1",
 			},
@@ -60,7 +66,7 @@ func TestNewAPI展示所选分组全部可靠价格并跳过损坏模型(t *test
 	if err != nil {
 		t.Fatalf("读取 New API 价格失败：%v", err)
 	}
-	if result.Catalog.Multiplier.String() != "0.5" || len(result.Catalog.Models) != 2 {
+	if result.Catalog.Multiplier.String() != "0.5" || len(result.Catalog.Models) != 3 {
 		t.Fatalf("价格目录基础信息不正确：%#v", result.Catalog)
 	}
 	if !strings.Contains(result.Catalog.Notice, "1 个模型价格无法识别") {
@@ -75,6 +81,10 @@ func TestNewAPI展示所选分组全部可靠价格并跳过损坏模型(t *test
 		"image_input": "5", "audio_input": "7.5", "audio_output": "30",
 	})
 	assertPriceValues(t, byName["image-request"].Prices, map[string]string{"per_request": "0.02"})
+	video := byName["video-second"]
+	if video.BillingMode != "per_second" || len(video.Prices) != 1 || video.Prices[0].Value.String() != "0.15" || video.Prices[0].Unit != "USD/秒" || len(video.Intervals) != 2 {
+		t.Fatalf("New API 按秒视频价格未进入分组目录：%#v", video)
+	}
 }
 
 func TestNewAPI分组价格跟随站点货币单位(t *testing.T) {
@@ -177,6 +187,32 @@ func TestNewAPI严格解析阶梯价格但不执行请求规则(t *testing.T) {
 		"input": "1.5", "output": "7.5", "cache_read": "0.15", "cache_write": "1.875",
 		"cache_write_1h": "3", "image_input": "1", "image_output": "2", "audio_input": "0.5", "audio_output": "2.5",
 	})
+}
+
+func TestNewAPI按秒视频价格支持分辨率明细(t *testing.T) {
+	model, err := parseNewAPIModelPrice(map[string]any{
+		"quota_type":  2,
+		"model_price": 0.3,
+		"price_unit":  "second",
+		"video_per_second_pricing": map[string]any{
+			"default_resolution": "720p",
+			"prices":             map[string]any{"480p": 0.25, "720p": 0.3, "1080p": 0.55},
+		},
+	}, mustPriceDecimal(t, "0.5"))
+	if err != nil {
+		t.Fatalf("解析按秒视频价格失败：%v", err)
+	}
+	if model.BillingMode != "per_second" || len(model.Prices) != 1 || model.Prices[0].Key != "per_second" || model.Prices[0].Value.String() != "0.15" || model.Prices[0].Unit != "USD/秒" {
+		t.Fatalf("按秒基础价格结构不正确：%#v", model)
+	}
+	if len(model.Intervals) != 3 {
+		t.Fatalf("按秒分辨率价格数量不正确：%#v", model.Intervals)
+	}
+	for _, interval := range model.Intervals {
+		if len(interval.Prices) != 1 || interval.Prices[0].Key != "per_second" || interval.Prices[0].Unit != "USD/秒" {
+			t.Fatalf("按秒分辨率价格结构不正确：%#v", model.Intervals)
+		}
+	}
 }
 
 func TestNewAPI非上下文阶梯只返回条件说明(t *testing.T) {

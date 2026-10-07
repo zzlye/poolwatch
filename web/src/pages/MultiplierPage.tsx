@@ -53,6 +53,9 @@ function billingModeLabel(value: string): string {
     case 'request':
     case 'per_request':
       return '按次'
+    case 'per_second':
+    case 'second':
+      return '按秒'
     case 'image':
     case 'per_image':
       return '按图片'

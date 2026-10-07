@@ -101,6 +101,8 @@ func ModelPriceObservations(catalog monitor.GroupPriceCatalog) []store.ModelPric
 		switch model.BillingMode {
 		case "request", "per_request":
 			label = "按次"
+		case "second", "per_second":
+			label = "按秒"
 		case "image", "per_image":
 			label = "按图片"
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -252,6 +253,12 @@ func newAPIModelEnabledForGroup(raw any, groupKey string) (bool, error) {
 
 func parseNewAPIModelPrice(row map[string]any, multiplier decimal.Decimal) (GroupModelPrice, error) {
 	mode := strings.TrimSpace(stringField(row, "billing_mode"))
+	if mode == "per_second" || mode == "second" || mode == "per-second" {
+		if !newAPIHasPerSecondPricing(row) {
+			return GroupModelPrice{BillingMode: "custom", Prices: []GroupPriceItem{}, Note: "该模型采用站点自定义计费方式，未公开明确的按秒单位和价格"}, nil
+		}
+		return parseNewAPIPerSecondPrice(row, multiplier)
+	}
 	if mode == "tiered_expr" {
 		tiers, hasRequestRules, err := parseNewAPITierPrices(stringField(row, "billing_expr"), multiplier)
 		model := GroupModelPrice{BillingMode: "tiered", Prices: []GroupPriceItem{}, Intervals: []GroupPriceInterval{}}
@@ -270,7 +277,7 @@ func parseNewAPIModelPrice(row map[string]any, multiplier decimal.Decimal) (Grou
 		return model, nil
 	}
 	quotaType, err := parseInt64(row["quota_type"])
-	if err != nil || (quotaType != 0 && quotaType != 1) {
+	if err != nil || (quotaType != 0 && quotaType != 1 && quotaType != 2) {
 		return GroupModelPrice{}, groupPriceFailure("解析 New API 模型价格", "New API 模型计费类型无效", err)
 	}
 	if quotaType == 1 {
@@ -284,6 +291,15 @@ func parseNewAPIModelPrice(row map[string]any, multiplier decimal.Decimal) (Grou
 		}
 		item, _ := newGroupPriceItem("per_request", "按次", "USD/次", price)
 		return GroupModelPrice{BillingMode: "per_request", Prices: []GroupPriceItem{item}}, nil
+	}
+	if quotaType == 2 {
+		if !newAPIHasPerSecondPricing(row) {
+			return GroupModelPrice{
+				BillingMode: "custom", Prices: []GroupPriceItem{}, Intervals: []GroupPriceInterval{},
+				Note: "该模型采用站点自定义计费方式，未公开明确的按秒单位和价格",
+			}, nil
+		}
+		return parseNewAPIPerSecondPrice(row, multiplier)
 	}
 	modelRatio, err := parseRequiredNewAPIPrice(row, "model_ratio")
 	if err != nil {
@@ -321,6 +337,102 @@ func parseNewAPIModelPrice(row map[string]any, multiplier decimal.Decimal) (Grou
 		return GroupModelPrice{}, groupPriceFailure("计算 New API 模型价格", "New API 模型价格超出安全范围", err)
 	}
 	return GroupModelPrice{BillingMode: "token", Prices: prices}, nil
+}
+
+func newAPIHasPerSecondPricing(row map[string]any) bool {
+	unit := strings.ToLower(strings.TrimSpace(stringField(row, "price_unit")))
+	switch unit {
+	case "second", "seconds", "per_second", "sec", "秒", "每秒":
+		return true
+	}
+	_, hasVideoPricing := row["video_per_second_pricing"]
+	return hasVideoPricing
+}
+
+// parseNewAPIPerSecondPrice 解析魔改 New API 的视频按秒计费协议。
+// 该协议使用 quota_type=2 和 model_price 表示默认每秒价格，部分站点还会
+// 在 video_per_second_pricing.prices 中公开不同分辨率的每秒价格。
+func parseNewAPIPerSecondPrice(row map[string]any, multiplier decimal.Decimal) (GroupModelPrice, error) {
+	model := GroupModelPrice{BillingMode: "per_second", Prices: []GroupPriceItem{}, Intervals: []GroupPriceInterval{}}
+	if rawBase, exists := row["model_price"]; exists && rawBase != nil {
+		base, err := parsePriceDecimal(rawBase)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 按秒价格无效", err)
+		}
+		base, err = multiplyPrice(base, multiplier)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("计算 New API 视频价格", "New API 按秒价格超出安全范围", err)
+		}
+		baseItem, err := newGroupPriceItem("per_second", "按秒", "USD/秒", base)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 按秒价格无效", err)
+		}
+		model.Prices = append(model.Prices, baseItem)
+	}
+
+	videoPricing, _ := row["video_per_second_pricing"].(map[string]any)
+	rawPrices, _ := videoPricing["prices"].(map[string]any)
+	if len(rawPrices) == 0 {
+		if len(model.Prices) == 0 {
+			return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 响应缺少按秒价格", nil)
+		}
+		return model, nil
+	}
+	type resolutionPrice struct {
+		label string
+		value any
+	}
+	resolutions := make([]resolutionPrice, 0, len(rawPrices))
+	for rawResolution, rawValue := range rawPrices {
+		resolution := normalizeGroupPriceText(rawResolution, 32)
+		if resolution != "" {
+			resolutions = append(resolutions, resolutionPrice{label: resolution, value: rawValue})
+		}
+	}
+	// 先按常见视频分辨率排序，再按名称排序，避免上游 JSON 顺序变化造成误报。
+	sort.Slice(resolutions, func(left, right int) bool {
+		leftOrder, rightOrder := videoResolutionOrder(resolutions[left].label), videoResolutionOrder(resolutions[right].label)
+		if leftOrder != rightOrder {
+			return leftOrder < rightOrder
+		}
+		return strings.ToLower(resolutions[left].label) < strings.ToLower(resolutions[right].label)
+	})
+	for _, resolution := range resolutions {
+		price, err := parsePriceDecimal(resolution.value)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 分辨率按秒价格无效", err)
+		}
+		price, err = multiplyPrice(price, multiplier)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("计算 New API 视频价格", "New API 分辨率按秒价格超出安全范围", err)
+		}
+		item, err := newGroupPriceItem("per_second", "按秒", "USD/秒", price)
+		if err != nil {
+			return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 分辨率按秒价格无效", err)
+		}
+		model.Intervals = append(model.Intervals, GroupPriceInterval{Label: resolution.label, Prices: []GroupPriceItem{item}})
+	}
+	if len(model.Prices) == 0 && len(model.Intervals) == 0 {
+		return GroupModelPrice{}, groupPriceFailure("解析 New API 视频价格", "New API 响应缺少按秒价格", nil)
+	}
+	return model, nil
+}
+
+func videoResolutionOrder(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "480p":
+		return 10
+	case "720p":
+		return 20
+	case "1080p":
+		return 30
+	case "2k":
+		return 40
+	case "4k":
+		return 50
+	default:
+		return 1000
+	}
 }
 
 func parseRequiredNewAPIPrice(row map[string]any, field string) (decimal.Decimal, error) {
