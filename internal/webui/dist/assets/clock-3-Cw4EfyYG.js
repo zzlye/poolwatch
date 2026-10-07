@@ -1,0 +1,1 @@
+import{g as e}from"./index-q7KnXpHs.js";var t=e(`circle-off`,[[`path`,{d:`m2 2 20 20`,key:`1ooewy`}],[`path`,{d:`M8.35 2.69A10 10 0 0 1 21.3 15.65`,key:`1pfsoa`}],[`path`,{d:`M19.08 19.08A10 10 0 1 1 4.92 4.92`,key:`1ablyi`}]]),n=e(`clock-3`,[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`M12 6v6h4`,key:`135r8i`}]]);export{t as n,n as t};
